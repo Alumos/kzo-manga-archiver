@@ -1,4 +1,4 @@
-# koxmoe-transfer
+# kzo-manga-archiver
 
 本地运行的漫画转存工具：使用账号密码登录 `kzo.moe`，读取漫画与卷/话列表，调用站点 EPUB 下载接口并发转存到 NAS。
 
