@@ -125,6 +125,36 @@ func TestClearJobsOnlyRemovesCompleted(t *testing.T) {
 	}
 }
 
+func TestCancelJobStopsQueueAndCleansTempFiles(t *testing.T) {
+	root := t.TempDir()
+	input := downloadRequest{ComicName: "测试漫画", Category: "愛情", Chapters: []Chapter{{Title: "卷 01"}, {Title: "卷 02"}}}
+	job := newJob("cancel", input)
+	job.Chapters[1].Status = "completed"
+	app := &App{cfg: Config{Authenticated: true, NASDir: root}, jobs: map[string]*Job{job.ID: job}}
+	dir := downloadDir(app.cfg, input.Category, input.ComicName)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	tempPath := filepath.Join(dir, ".epub-cancel.tmp")
+	if err := os.WriteFile(tempPath, []byte("partial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	app.cancelJobHandler(recorder, httptest.NewRequest(http.MethodPost, "/api/jobs/cancel", strings.NewReader(`{"jobId":"cancel"}`)))
+	if recorder.Code != http.StatusOK || job.Status != "cancelled" || job.Chapters[0].Status != "cancelled" || job.Chapters[1].Status != "completed" {
+		t.Fatalf("cancel job = %d, %+v", recorder.Code, job)
+	}
+	if job.ctx.Err() != context.Canceled {
+		t.Fatalf("job context was not cancelled: %v", job.ctx.Err())
+	}
+	if _, ok := app.beginDownloadTask(downloadTask{JobID: job.ID, ChapterID: job.Chapters[0].ID}); ok {
+		t.Fatal("cancelled queued task was allowed to start")
+	}
+	if _, err := os.Stat(tempPath); !os.IsNotExist(err) {
+		t.Fatalf("cancelled temp file remains: %v", err)
+	}
+}
+
 func TestBookofVolumeCovers(t *testing.T) {
 	if got, ok := bookofURLForKzoComic("https://kzo.moe/c/11842.htm"); !ok || got != "https://bookof.moe/b/11842.htm" {
 		t.Fatalf("bookof URL = %q, %v", got, ok)
@@ -185,6 +215,27 @@ func TestKzoDetailParser(t *testing.T) {
 	}
 	if detail.Title != "测试漫画" || detail.Author != "作者甲" || detail.Score != 9.1 || detail.ScoreCount != 383 || detail.CoverURL != "https://kzo.moe/cover.jpg" || detail.Description != "这是简介 第二行" {
 		t.Fatalf("detail = %+v", detail)
+	}
+}
+
+func TestKzoAccountStatusParser(t *testing.T) {
+	level, vip, err := parseKzoAccountStatus([]byte(`<td>Lv 等級：</td><td>Lv3</td><script>var user_level = "3"; var is_vip = "1";</script>`))
+	if err != nil || level != "LV3" || !vip {
+		t.Fatalf("VIP account status = %q, %v, %v", level, vip, err)
+	}
+	level, vip, err = parseKzoAccountStatus([]byte(`<td>Lv 等級：</td><td>Lv1</td><script>var user_level = "1"; var is_vip = "0";</script>`))
+	if err != nil || level != "LV1" || vip {
+		t.Fatalf("normal account status = %q, %v, %v", level, vip, err)
+	}
+}
+
+func TestKzoDownloadRouteSelection(t *testing.T) {
+	url := "https://kzo.moe/getdownurl.php?b=1&vip=0"
+	if got := preferredKzoDownloadURL(url, true); !strings.Contains(got, "vip=1") {
+		t.Fatalf("VIP route = %q", got)
+	}
+	if got := alternateKzoDownloadURL(preferredKzoDownloadURL(url, true)); !strings.Contains(got, "vip=0") {
+		t.Fatalf("VIP fallback route = %q", got)
 	}
 }
 
