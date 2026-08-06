@@ -21,7 +21,7 @@ button { cursor: pointer; }
 .shell { min-height: 100vh; }
 .topbar { position: sticky; top: 0; z-index: 5; display: flex; justify-content: space-between; align-items: center; min-height: 68px; padding: 0 max(20px, calc((100vw - 1320px) / 2)); border-bottom: 1px solid rgba(39,39,42,.8); background: rgba(9,9,11,.8); backdrop-filter: blur(14px); }
 .brand { display: flex; align-items: center; gap: 10px; color: var(--foreground); text-decoration: none; letter-spacing: -.02em; }
-.brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 8px; background: var(--primary); color: var(--primary-fg); font-weight: 800; }
+.brand-mark { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 8px; background: var(--primary); color: var(--primary-fg); font-size: 10px; font-weight: 800; letter-spacing: -.08em; }
 .brand strong, .brand small { display: block; }
 .brand small { margin-top: 1px; color: var(--muted-2); font-size: 8px; letter-spacing: .18em; }
 .top-actions, .chapter-badges, .dialog-actions { display: flex; align-items: center; gap: 9px; }
@@ -71,6 +71,7 @@ input:focus, select:focus { border-color: var(--ring); box-shadow: 0 0 0 3px rgb
 .button.primary:hover:not(:disabled) { background: #d4d4d8; }
 .badge { display: inline-flex; align-items: center; min-height: 24px; padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; white-space: nowrap; }
 .badge.success { border-color: #14532d; background: #052e16; color: #86efac; }
+.badge.vip { border-color: #9a6b23; background: linear-gradient(135deg, #3b260d, #21180c); color: #f8d48a; box-shadow: 0 0 16px rgba(217, 164, 65, .18); }
 .badge.muted { color: var(--muted); }
 .comic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); gap: 12px; min-height: 350px; padding: 18px; align-content: start; }
 .comic-card { display: flex; min-height: 285px; flex-direction: column; padding: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: #151518; color: var(--foreground); text-align: left; transition: border .15s, background .15s, transform .15s; }
@@ -132,6 +133,7 @@ input:focus, select:focus { border-color: var(--ring); box-shadow: 0 0 0 3px rgb
 .job-summary:hover, .job-summary:focus-visible { background: #27272a; outline: none; }
 .job-summary-main { display: flex; align-items: center; min-width: 0; gap: 12px; }
 .job-summary-info { min-width: 0; }
+.job-summary-actions { display: flex; align-items: center; flex: 0 0 auto; gap: 8px; }
 .job-title-row { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .job-title-row strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
 .job-summary-meta { display: block; margin-top: 5px; color: var(--muted-2); font-size: 10px; }
@@ -144,6 +146,7 @@ input:focus, select:focus { border-color: var(--ring); box-shadow: 0 0 0 3px rgb
 .job-group[open] .job-toggle-icon { transform: rotate(180deg); }
 .job-group[open] .job-toggle > span:last-child { font-size: 0; }
 .job-group[open] .job-toggle > span:last-child::after { content: "收起"; font-size: 11px; }
+.job-cancel-button { min-height: 34px; padding: 6px 10px; }
 .job-cover { display: grid; place-items: center; overflow: hidden; border: 1px solid #3a3a40; border-radius: 8px; background: #111114; color: var(--muted-2); text-align: center; }
 .job-cover img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .job-cover.placeholder { padding: 8px; font-size: 10px; line-height: 1.45; }
@@ -165,11 +168,13 @@ input:focus, select:focus { border-color: var(--ring); box-shadow: 0 0 0 3px rgb
 .chapter-job-status.running { color: #fde68a; border-color: #66551e; background: #241f0d; }
 .chapter-job-status.completed { color: #86efac; border-color: #285c3b; background: #102319; }
 .chapter-job-status.failed { color: #fca5a5; border-color: #673333; background: #281313; }
+.chapter-job-status.cancelled { color: var(--muted-2); border-color: #4a4a52; background: #202024; }
 .chapter-progress { height: 4px; }
 .job-chapter-footer { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; }
 .job-chapter-meta { color: var(--muted-2); font-size: 10px; }
 .retry-button { min-height: 28px; padding: 4px 10px; font-size: 11px; }
 .failure { margin-top: 7px; color: #fca5a5; font-size: 11px; line-height: 1.5; }
+.failure.cancelled { color: var(--muted-2); }
 .notice { margin-bottom: 18px; padding: 11px 14px; border: 1px solid #7f1d1d; border-radius: 9px; background: #1c0b0b; color: #fca5a5; font-size: 13px; }
 .notice.hidden { display: none; }
 .login-dialog { width: min(420px, calc(100% - 28px)); padding: 0; border: 1px solid var(--border); border-radius: 14px; background: var(--card); color: var(--foreground); box-shadow: 0 20px 80px #000; }
@@ -252,9 +257,11 @@ button.file-name:hover { color: #fff; text-decoration: underline; }
   .jobs-list { padding-left: 12px; padding-right: 12px; }
   .job-summary { gap: 8px; padding: 11px; }
   .job-summary-main { gap: 8px; }
+  .job-summary-actions { gap: 5px; }
   .job-main-cover { width: 40px; height: 54px; flex-basis: 40px; }
   .job-toggle { padding: 6px 7px; }
   .job-toggle span:last-child { display: none; }
+  .job-cancel-button { min-height: 30px; padding: 5px 7px; }
   .job-body { padding: 12px 11px; }
   .job-chapter { grid-template-columns: 54px minmax(0, 1fr); gap: 9px; padding: 8px; }
   .job-volume-cover { width: 54px; height: 74px; }

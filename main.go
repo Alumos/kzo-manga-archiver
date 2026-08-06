@@ -53,6 +53,10 @@ var (
 	kzoDetailDescRE    = regexp.MustCompile(`(?is)<div[^>]*id=["']div_desc_content["'][^>]*>(.*?)</div>`)
 	kzoDetailDescJSRE  = regexp.MustCompile(`(?is)document\.getElementById\(["']div_desc_content["']\)\.innerHTML\s*=\s*"((?:\\.|[^"\\])*)"`)
 	kzoComicPathRE     = regexp.MustCompile(`^/c/([0-9]+)\.htm$`)
+	kzoUserLevelRE     = regexp.MustCompile(`(?i)\bvar\s+user_level\s*=\s*["']?([0-9]+)`)
+	kzoIsVIPRE         = regexp.MustCompile(`(?i)\bvar\s+is_vip\s*=\s*["']?([0-9]+)`)
+	kzoLevelTextRE     = regexp.MustCompile(`(?is)Lv\s*等級：.*?<td[^>]*>\s*Lv\s*([0-9]+)`)
+	kzoVIPTextRE       = regexp.MustCompile(`(?is)本站\s*<font[^>]*>\s*VIP\s*</font>`)
 	bookofVolumeDataRE = regexp.MustCompile(`(?i)(?:https?://bookof\.moe)?/data_vol\.php\?h=[^"']+`)
 	bookofVolumeRE     = regexp.MustCompile(`(?i)datainfo-V=([0-9]+),[^,]*,([^,]*),[^,]*,([^,]*),([^",]*)`)
 	kzoListPageRE      = regexp.MustCompile(`^/l/[^/]+/[0-9]+\.htm$`)
@@ -80,6 +84,8 @@ type Config struct {
 	SessionFile   string `json:"-"`
 	Username      string `json:"username"`
 	Workers       int    `json:"workers"`
+	AccountLevel  string `json:"level,omitempty"`
+	VIP           bool   `json:"vip"`
 	Authenticated bool   `json:"authenticated"`
 }
 
@@ -93,9 +99,11 @@ type savedCookie struct {
 }
 
 type savedSession struct {
-	UpstreamURL string        `json:"upstreamUrl"`
-	Username    string        `json:"username"`
-	Cookies     []savedCookie `json:"cookies"`
+	UpstreamURL  string        `json:"upstreamUrl"`
+	Username     string        `json:"username"`
+	AccountLevel string        `json:"accountLevel,omitempty"`
+	VIP          bool          `json:"vip"`
+	Cookies      []savedCookie `json:"cookies"`
 }
 
 type Comic struct {
@@ -188,6 +196,8 @@ type Job struct {
 	FinishedAt time.Time    `json:"finishedAt,omitempty"`
 	Chapters   []JobChapter `json:"chapters"`
 	request    downloadRequest
+	ctx        context.Context
+	cancel     context.CancelFunc
 }
 
 type JobChapter struct {
@@ -276,6 +286,7 @@ func main() {
 	mux.HandleFunc("/api/download", app.downloadHandler)
 	mux.HandleFunc("/api/jobs", app.jobsHandler)
 	mux.HandleFunc("/api/jobs/clear", app.clearJobsHandler)
+	mux.HandleFunc("/api/jobs/cancel", app.cancelJobHandler)
 	mux.HandleFunc("/api/jobs/retry", app.retryJobHandler)
 	mux.HandleFunc("/api/proxy/test", app.proxyTestHandler)
 	mux.HandleFunc("/api/files", app.filesHandler)
@@ -385,6 +396,8 @@ func (a *App) resetSession() {
 	a.mu.Lock()
 	a.client = buildHTTPClient(cfg, jar)
 	a.cfg.Authenticated = false
+	a.cfg.AccountLevel = ""
+	a.cfg.VIP = false
 	a.mu.Unlock()
 	_ = os.Remove(cfg.SessionFile)
 }
@@ -415,6 +428,8 @@ func (a *App) loadSession() {
 	if len(client.Jar.Cookies(upstream)) > 0 {
 		a.mu.Lock()
 		a.cfg.Username = saved.Username
+		a.cfg.AccountLevel = saved.AccountLevel
+		a.cfg.VIP = saved.VIP
 		a.cfg.Authenticated = true
 		a.mu.Unlock()
 	}
@@ -426,7 +441,7 @@ func (a *App) saveSession(username string) error {
 	if err != nil || cfg.SessionFile == "" {
 		return errors.New("invalid session storage configuration")
 	}
-	saved := savedSession{UpstreamURL: cfg.UpstreamURL, Username: username}
+	saved := savedSession{UpstreamURL: cfg.UpstreamURL, Username: username, AccountLevel: cfg.AccountLevel, VIP: cfg.VIP}
 	for _, cookie := range a.httpClient().Jar.Cookies(upstream) {
 		saved.Cookies = append(saved.Cookies, savedCookie{Name: cookie.Name, Value: cookie.Value, Path: cookie.Path, Expires: cookie.Expires, Secure: cookie.Secure, HttpOnly: cookie.HttpOnly})
 	}
@@ -542,6 +557,9 @@ func (a *App) loginKzo(ctx context.Context, username, password string) error {
 	if len(client.Jar.Cookies(upstream)) == 0 {
 		return errors.New("login succeeded without a session cookie")
 	}
+	if err := a.refreshKzoAccount(ctx); err != nil {
+		log.Printf("KZO account status refresh failed: %v", err)
+	}
 	if err := a.saveSession(username); err != nil {
 		return fmt.Errorf("login succeeded but could not save session: %w", err)
 	}
@@ -554,6 +572,46 @@ func (a *App) setAuthenticated(username string) {
 	a.cfg.Username = username
 	a.cfg.Authenticated = true
 	a.mu.Unlock()
+}
+
+func (a *App) refreshKzoAccount(ctx context.Context) error {
+	cfg := a.config()
+	if !isKzoURL(cfg.UpstreamURL) {
+		return nil
+	}
+	statusCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	body, _, err := a.fetch(statusCtx, resolveURL(cfg.UpstreamURL, "/my.php"), 8<<20)
+	if err != nil {
+		return err
+	}
+	level, vip, err := parseKzoAccountStatus(body)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.cfg.AccountLevel = level
+	a.cfg.VIP = vip
+	a.mu.Unlock()
+	return nil
+}
+
+func parseKzoAccountStatus(body []byte) (string, bool, error) {
+	data := string(body)
+	level := ""
+	if match := kzoUserLevelRE.FindStringSubmatch(data); len(match) > 1 {
+		level = "LV" + match[1]
+	} else if match := kzoLevelTextRE.FindStringSubmatch(data); len(match) > 1 {
+		level = "LV" + match[1]
+	}
+	if level == "" {
+		return "", false, errors.New("kzo account page has no account level")
+	}
+	vip := kzoVIPTextRE.MatchString(data)
+	if match := kzoIsVIPRE.FindStringSubmatch(data); len(match) > 1 {
+		vip = match[1] != "0"
+	}
+	return level, vip, nil
 }
 
 func (a *App) loginGeneric(ctx context.Context, username, password string) error {
@@ -633,6 +691,12 @@ func (a *App) loginGeneric(ctx context.Context, username, password string) error
 func (a *App) settingsHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		cfg := a.config()
+		if cfg.Authenticated && isKzoURL(cfg.UpstreamURL) && cfg.AccountLevel == "" {
+			if err := a.refreshKzoAccount(r.Context()); err == nil && cfg.Username != "" {
+				_ = a.saveSession(cfg.Username)
+			}
+			cfg = a.config()
+		}
 		writeJSON(w, http.StatusOK, map[string]any{
 			"upstreamUrl":   cfg.UpstreamURL,
 			"loginPath":     cfg.LoginPath,
@@ -642,6 +706,8 @@ func (a *App) settingsHandler(w http.ResponseWriter, r *http.Request) {
 			"proxyEnabled":  cfg.ProxyEnabled,
 			"username":      cfg.Username,
 			"workers":       cfg.Workers,
+			"level":         cfg.AccountLevel,
+			"vip":           cfg.VIP,
 			"authenticated": cfg.Authenticated,
 		})
 		return
@@ -747,7 +813,13 @@ func (a *App) authStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cfg := a.config()
-	writeJSON(w, http.StatusOK, map[string]any{"authenticated": cfg.Authenticated, "username": cfg.Username})
+	if cfg.Authenticated && isKzoURL(cfg.UpstreamURL) && cfg.AccountLevel == "" {
+		if err := a.refreshKzoAccount(r.Context()); err == nil && cfg.Username != "" {
+			_ = a.saveSession(cfg.Username)
+		}
+		cfg = a.config()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"authenticated": cfg.Authenticated, "username": cfg.Username, "level": cfg.AccountLevel, "vip": cfg.VIP})
 }
 
 func (a *App) logoutHandler(w http.ResponseWriter, r *http.Request) {
@@ -1065,6 +1137,60 @@ func (a *App) clearJobsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]int{"removed": removed})
+}
+
+func (a *App) cancelJobHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.authenticated() {
+		writeError(w, http.StatusUnauthorized, "please log in first")
+		return
+	}
+	var input struct {
+		JobID string `json:"jobId"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid cancel request")
+		return
+	}
+	a.mu.Lock()
+	job := a.jobs[input.JobID]
+	if job == nil {
+		a.mu.Unlock()
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	if job.Status != "queued" && job.Status != "running" {
+		a.mu.Unlock()
+		writeError(w, http.StatusConflict, "only queued or running jobs can be cancelled")
+		return
+	}
+	job.Status = "cancelled"
+	job.Error = "用户取消下载"
+	job.FinishedAt = time.Now()
+	for index := range job.Chapters {
+		chapter := &job.Chapters[index]
+		if chapter.Status != "queued" && chapter.Status != "running" {
+			continue
+		}
+		chapter.Status = "cancelled"
+		chapter.Error = "用户取消下载"
+		chapter.SpeedBPS = 0
+		chapter.FinishedAt = job.FinishedAt
+	}
+	cancel := job.cancel
+	job.cancel = nil
+	summarizeJob(job)
+	request := job.request
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	a.cleanupJobTempFiles(request)
+	snapshot, _ := a.jobSnapshot(input.JobID)
+	writeJSON(w, http.StatusOK, snapshot)
 }
 
 func (a *App) retryJobHandler(w http.ResponseWriter, r *http.Request) {
@@ -1578,7 +1704,11 @@ func (a *App) scanKzoChapters(ctx context.Context, comicURL string) ([]Chapter, 
 		query := volumeURL.Query()
 		query.Set("v", volumeID)
 		volumeURL.RawQuery = query.Encode()
-		downloadQuery := url.Values{"b": {string(bookIDMatch[1])}, "v": {volumeID}, "mobi": {"2"}, "vip": {"0"}, "json": {"1"}}
+		vipRoute := "0"
+		if cfg.VIP {
+			vipRoute = "1"
+		}
+		downloadQuery := url.Values{"b": {string(bookIDMatch[1])}, "v": {volumeID}, "mobi": {"2"}, "vip": {vipRoute}, "json": {"1"}}
 		chapters = append(chapters, Chapter{
 			Title:       title,
 			URL:         volumeURL.String(),
@@ -1696,6 +1826,7 @@ func (a *App) getPage(ctx context.Context, rawURL string) (page, error) {
 }
 
 func newJob(id string, input downloadRequest) *Job {
+	ctx, cancel := context.WithCancel(context.Background())
 	job := &Job{
 		ID:        id,
 		Status:    "queued",
@@ -1704,6 +1835,8 @@ func newJob(id string, input downloadRequest) *Job {
 		Total:     len(input.Chapters),
 		StartedAt: time.Now(),
 		request:   input,
+		ctx:       ctx,
+		cancel:    cancel,
 		Chapters:  make([]JobChapter, len(input.Chapters)),
 	}
 	for index, chapter := range input.Chapters {
@@ -1741,6 +1874,7 @@ func summarizeJob(job *Job) {
 	job.Files = nil
 	job.Failures = nil
 	hasRunning := false
+	hasCancelled := job.Status == "cancelled"
 	allDone := len(job.Chapters) > 0
 	for _, chapter := range job.Chapters {
 		job.BytesDone += chapter.Done
@@ -1758,11 +1892,19 @@ func summarizeJob(job *Job) {
 		case "running":
 			hasRunning = true
 			allDone = false
+		case "cancelled":
+			hasCancelled = true
+			allDone = false
 		default:
 			allDone = false
 		}
 	}
-	if allDone {
+	if hasCancelled {
+		job.Status = "cancelled"
+		if job.FinishedAt.IsZero() {
+			job.FinishedAt = time.Now()
+		}
+	} else if allDone {
 		if len(job.Failures) > 0 {
 			job.Status = "completed_with_errors"
 		} else {
@@ -1800,14 +1942,16 @@ func (a *App) updateJobChapter(jobID, chapterID string, update func(*Job, *JobCh
 
 func (a *App) downloadWorker() {
 	for task := range a.downloadQueue {
-		a.updateJobChapter(task.JobID, task.ChapterID, func(job *Job, chapter *JobChapter) {
-			chapter.Status = "running"
-			chapter.StartedAt = time.Now()
-			job.Error = ""
-		})
+		ctx, ok := a.beginDownloadTask(task)
+		if !ok {
+			continue
+		}
 		cfg := a.config()
-		filename, err := a.downloadChapter(context.Background(), cfg, task.Request.ComicName, task.Request.Category, task.Request.ComicURL, task.Chapter, func(done, total int64) {
-			a.updateJobChapter(task.JobID, task.ChapterID, func(_ *Job, chapter *JobChapter) {
+		filename, err := a.downloadChapter(ctx, cfg, task.Request.ComicName, task.Request.Category, task.Request.ComicURL, task.Chapter, func(done, total int64) {
+			a.updateJobChapter(task.JobID, task.ChapterID, func(job *Job, chapter *JobChapter) {
+				if job.Status == "cancelled" {
+					return
+				}
 				chapter.Done = done
 				chapter.Total = maxInt64(total, 0)
 				if !chapter.StartedAt.IsZero() {
@@ -1818,19 +1962,76 @@ func (a *App) downloadWorker() {
 				}
 			})
 		})
-		a.updateJobChapter(task.JobID, task.ChapterID, func(_ *Job, chapter *JobChapter) {
-			chapter.FinishedAt = time.Now()
-			if err != nil {
-				chapter.Status = "failed"
-				chapter.Error = err.Error()
-				return
-			}
-			chapter.Status = "completed"
-			chapter.File = filename
-			if chapter.Total > 0 {
-				chapter.Done = chapter.Total
-			}
-		})
+		a.finishDownloadTask(task, filename, err)
+	}
+}
+
+func (a *App) beginDownloadTask(task downloadTask) (context.Context, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	job := a.jobs[task.JobID]
+	if job == nil || job.Status == "cancelled" {
+		return nil, false
+	}
+	var chapter *JobChapter
+	for index := range job.Chapters {
+		if job.Chapters[index].ID == task.ChapterID {
+			chapter = &job.Chapters[index]
+			break
+		}
+	}
+	if chapter == nil || chapter.Status != "queued" {
+		return nil, false
+	}
+	if job.ctx == nil {
+		job.ctx, job.cancel = context.WithCancel(context.Background())
+	}
+	chapter.Status = "running"
+	chapter.StartedAt = time.Now()
+	job.Error = ""
+	summarizeJob(job)
+	return job.ctx, true
+}
+
+func (a *App) finishDownloadTask(task downloadTask, filename string, err error) {
+	removePath := ""
+	a.mu.Lock()
+	job := a.jobs[task.JobID]
+	if job == nil {
+		a.mu.Unlock()
+		return
+	}
+	var chapter *JobChapter
+	for index := range job.Chapters {
+		if job.Chapters[index].ID == task.ChapterID {
+			chapter = &job.Chapters[index]
+			break
+		}
+	}
+	if chapter == nil {
+		a.mu.Unlock()
+		return
+	}
+	chapter.FinishedAt = time.Now()
+	if job.Status == "cancelled" {
+		chapter.Status = "cancelled"
+		chapter.Error = "用户取消下载"
+		chapter.SpeedBPS = 0
+		removePath = filename
+	} else if err != nil {
+		chapter.Status = "failed"
+		chapter.Error = err.Error()
+	} else {
+		chapter.Status = "completed"
+		chapter.File = filename
+		if chapter.Total > 0 {
+			chapter.Done = chapter.Total
+		}
+	}
+	summarizeJob(job)
+	a.mu.Unlock()
+	if removePath != "" {
+		a.removeDownloadedFile(removePath)
 	}
 }
 
@@ -1906,25 +2107,40 @@ func (a *App) downloadChapter(ctx context.Context, cfg Config, comicName, catego
 			}
 		}()
 	}
+	queueCancelled := false
 	for index := range images {
-		queue <- index
+		select {
+		case queue <- index:
+		case <-ctx.Done():
+			queueCancelled = true
+		}
+		if queueCancelled {
+			break
+		}
 	}
 	close(queue)
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if firstErr != nil {
 		return "", firstErr
 	}
 
 	dir, filename := chapterOutput(cfg, category, comicName, chapter.Title)
-	return saveFile(dir, filename, func(file *os.File) error {
+	return a.saveDownloadedFile(ctx, dir, filename, func(file *os.File) error {
 		return writeEPUB(file, safeName(comicName), chapter, images, comicURL)
 	})
 }
 
 func (a *App) downloadKzoEPUB(ctx context.Context, cfg Config, comicName, category string, chapter Chapter, progress progressFunc) (string, error) {
-	data, err := a.fetchKzoEPUB(ctx, chapter.DownloadURL, cfg.UpstreamURL, progress)
+	primaryURL := preferredKzoDownloadURL(chapter.DownloadURL, cfg.VIP)
+	data, err := a.fetchKzoEPUB(ctx, primaryURL, cfg.UpstreamURL, progress)
 	if err != nil {
-		alternateURL := alternateKzoDownloadURL(chapter.DownloadURL)
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		alternateURL := alternateKzoDownloadURL(primaryURL)
 		if alternateURL != "" {
 			if alternateData, alternateErr := a.fetchKzoEPUB(ctx, alternateURL, cfg.UpstreamURL, progress); alternateErr == nil {
 				data, err = alternateData, nil
@@ -1937,7 +2153,7 @@ func (a *App) downloadKzoEPUB(ctx context.Context, cfg Config, comicName, catego
 		}
 	}
 	dir, filename := chapterOutput(cfg, category, comicName, chapter.Title)
-	return saveFile(dir, filename, func(file *os.File) error {
+	return a.saveDownloadedFile(ctx, dir, filename, func(file *os.File) error {
 		_, err := file.Write(data)
 		return err
 	})
@@ -2018,9 +2234,25 @@ func alternateKzoDownloadURL(rawURL string) string {
 	}
 	query := u.Query()
 	if query.Get("vip") == "1" {
-		return ""
+		query.Set("vip", "0")
+	} else {
+		query.Set("vip", "1")
 	}
-	query.Set("vip", "1")
+	u.RawQuery = query.Encode()
+	return u.String()
+}
+
+func preferredKzoDownloadURL(rawURL string, vip bool) string {
+	u, err := validHTTPURL(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	query := u.Query()
+	if vip {
+		query.Set("vip", "1")
+	} else {
+		query.Set("vip", "0")
+	}
 	u.RawQuery = query.Encode()
 	return u.String()
 }
@@ -2069,6 +2301,48 @@ func isZip(data []byte) bool {
 	}
 	_, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
 	return err == nil
+}
+
+func (a *App) saveDownloadedFile(ctx context.Context, dir, filename string, write func(*os.File) error) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+	path, err := saveFile(dir, filename, write)
+	if err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(path)
+		return "", err
+	}
+	return path, nil
+}
+
+func (a *App) removeDownloadedFile(path string) {
+	if path == "" {
+		return
+	}
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+	_ = os.Remove(path)
+}
+
+func (a *App) cleanupJobTempFiles(request downloadRequest) {
+	dir := downloadDir(a.config(), request.Category, request.ComicName)
+	a.fileMu.Lock()
+	defer a.fileMu.Unlock()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasPrefix(entry.Name(), ".epub-") || !strings.HasSuffix(entry.Name(), ".tmp") {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
 
 func saveFile(dir, filename string, write func(*os.File) error) (string, error) {

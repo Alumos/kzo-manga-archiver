@@ -23,8 +23,9 @@ async function load() {
   $("proxyEnabled").checked = Boolean(settings.proxyEnabled);
   $("workers").value = settings.workers || 4;
   $("username").value = settings.username || "";
-  $("adminAuth").textContent = settings.authenticated ? `已登录：${settings.username || "账号"}` : "未登录";
-  $("adminAuth").className = `badge ${settings.authenticated ? "success" : "muted"}`;
+  const accountLabel = settings.vip ? "VIP" : (settings.level || "已登录");
+  $("adminAuth").textContent = settings.authenticated ? `${accountLabel} · ${settings.username || "账号"}` : "未登录";
+  $("adminAuth").className = `badge ${settings.authenticated ? (settings.vip ? "vip" : "success") : "muted"}`;
   await loadFiles();
 }
 

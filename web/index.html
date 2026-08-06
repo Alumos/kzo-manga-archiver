@@ -4,16 +4,17 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="theme-color" content="#09090b" />
-    <title>Kozmoe Transfer</title>
+    <title>KZO Manga Archiver</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="stylesheet" href="/styles.css" />
     <script src="/app.js" defer></script>
   </head>
   <body>
     <div class="shell">
       <header class="topbar">
-        <a class="brand" href="/" aria-label="Kozmoe Transfer 首页">
-          <span class="brand-mark">K</span>
-          <span><strong>Kozmoe</strong><small>TRANSFER</small></span>
+        <a class="brand" href="/" aria-label="KZO Manga Archiver 首页">
+          <span class="brand-mark">KZO</span>
+          <span><strong>KZO</strong><small>ARCHIVER</small></span>
         </a>
         <div class="top-actions">
           <span id="authBadge" class="badge muted">未登录</span>
@@ -86,7 +87,7 @@
                 <div><p class="eyebrow">CHAPTERS</p><h2 id="downloadHeading">选择章节</h2></div>
                 <div class="chapter-badges"><span id="chapterCount" class="badge muted">0 章</span><span id="selectedCount" class="badge muted">已选 0 章</span></div>
               </div>
-              <div class="chapter-toolbar"><label class="check-row"><input id="selectAll" type="checkbox" /> 全选未下载章节</label><span class="muted-text">已下载章节会实时标记 · 全局最多 3 个 EPUB 并行</span></div>
+              <div class="chapter-toolbar"><label class="check-row"><input id="selectAll" type="checkbox" /> 全选未下载章节</label><span class="muted-text">已下载章节会实时标记 · 全局最多 2 个 EPUB 并行</span></div>
               <div id="chapters" class="chapter-list empty-state">选择漫画后加载章节</div>
               <div class="download-bar"><div><strong id="downloadTarget">下载目录 / —</strong><small>下载完成后按漫画名归档</small></div><button id="downloadButton" class="button primary" type="button" disabled>下载选中章节</button></div>
             </section>
@@ -109,7 +110,7 @@
         </form>
       </dialog>
 
-      <footer>koxmoe-transfer · 本地运行 · EPUB 输出</footer>
+      <footer>kzo-manga-archiver · 本地运行 · EPUB 输出</footer>
     </div>
   </body>
 </html>

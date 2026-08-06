@@ -50,8 +50,9 @@ async function loadAuth() {
   state.auth = await api("/api/auth/status");
   const authenticated = Boolean(state.auth.authenticated);
   const badge = $("authBadge");
-  badge.textContent = authenticated ? `已登录：${state.auth.username || "账号"}` : "未登录";
-  badge.className = `badge ${authenticated ? "success" : "muted"}`;
+  const accountLabel = state.auth.vip ? "VIP" : (state.auth.level || "已登录");
+  badge.textContent = authenticated ? `${accountLabel} · ${state.auth.username || "账号"}` : "未登录";
+  badge.className = `badge ${authenticated ? (state.auth.vip ? "vip" : "success") : "muted"}`;
   $("loginButton").classList.toggle("hidden", authenticated);
   $("logoutButton").classList.toggle("hidden", !authenticated);
   $("clearCompletedButton").disabled = !authenticated || !state.jobs.some((job) => job.status === "completed");
@@ -423,6 +424,19 @@ async function clearCompletedJobs() {
   }
 }
 
+async function cancelJob(jobID, button) {
+  if (!window.confirm("确定取消这个漫画的全部下载吗？已完成的 EPUB 不会删除。")) return;
+  setLoading(button, true, "取消中…");
+  try {
+    await api("/api/jobs/cancel", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jobId: jobID }) });
+    showNotice("下载已取消，临时文件已清理");
+    await loadJobs();
+  } catch (error) {
+    showNotice(error.message);
+    setLoading(button, false);
+  }
+}
+
 async function retryChapter(jobID, chapterID, button) {
   setLoading(button, true, "排队中…");
   try {
@@ -506,7 +520,18 @@ function renderJobs() {
     const toggle = document.createElement("span");
     toggle.className = "job-toggle";
     toggle.innerHTML = '<span class="job-toggle-icon">⌄</span><span>展开</span>';
-    summary.append(summaryMain, toggle);
+    const summaryActions = document.createElement("div");
+    summaryActions.className = "job-summary-actions";
+    if (active) {
+      const cancel = document.createElement("button");
+      cancel.className = "button danger job-cancel-button";
+      cancel.type = "button";
+      cancel.textContent = "取消";
+      cancel.onclick = (event) => { event.preventDefault(); event.stopPropagation(); cancelJob(job.id, cancel); };
+      summaryActions.append(cancel);
+    }
+    summaryActions.append(toggle);
+    summary.append(summaryMain, summaryActions);
     item.append(summary);
 
     const body = document.createElement("div");
@@ -557,16 +582,18 @@ function renderJobs() {
       chapterMeta.className = "job-chapter-meta";
       chapterMeta.textContent = chapter.total > 0 ? `${formatBytes(chapter.done)} / ${formatBytes(chapter.total)} · ${formatSpeed(chapter.speedBps)}` : formatSpeed(chapter.speedBps);
       footer.append(chapterMeta);
-      if (chapter.status === "failed") {
+      if (chapter.status === "failed" || chapter.status === "cancelled") {
         const retry = document.createElement("button");
-        retry.className = "button retry-button";
-        retry.type = "button";
-        retry.textContent = "重试";
-        retry.onclick = (event) => { event.preventDefault(); event.stopPropagation(); retryChapter(job.id, chapter.id, retry); };
-        footer.append(retry);
+        if (chapter.status === "failed") {
+          retry.className = "button retry-button";
+          retry.type = "button";
+          retry.textContent = "重试";
+          retry.onclick = (event) => { event.preventDefault(); event.stopPropagation(); retryChapter(job.id, chapter.id, retry); };
+          footer.append(retry);
+        }
         const failure = document.createElement("div");
-        failure.className = "failure";
-        failure.textContent = chapter.error || "下载失败";
+        failure.className = `failure ${chapter.status === "cancelled" ? "cancelled" : ""}`;
+        failure.textContent = chapter.error || (chapter.status === "cancelled" ? "用户取消下载" : "下载失败");
         content.append(info, chapterProgress, footer, failure);
       } else {
         content.append(info, chapterProgress, footer);
@@ -580,8 +607,8 @@ function renderJobs() {
   });
 }
 
-function jobStatus(job) { return { queued: "排队中", running: "下载中", completed: "已完成", completed_with_errors: "部分失败", failed: "失败" }[job.status] || job.status; }
-function jobChapterStatus(chapter) { return { queued: "排队中", running: "下载中", completed: "已完成", failed: "失败" }[chapter.status] || chapter.status; }
+function jobStatus(job) { return { queued: "排队中", running: "下载中", completed: "已完成", completed_with_errors: "部分失败", cancelled: "已取消", failed: "失败" }[job.status] || job.status; }
+function jobChapterStatus(chapter) { return { queued: "排队中", running: "下载中", completed: "已完成", failed: "失败", cancelled: "已取消" }[chapter.status] || chapter.status; }
 
 $("syncButton").onclick = () => syncLibrary();
 $("jobNavButton").onclick = openDownloadView;
