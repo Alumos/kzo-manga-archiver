@@ -15,6 +15,7 @@ import (
 	"log"
 	"mime"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -62,6 +63,11 @@ var (
 	tagRE              = regexp.MustCompile(`(?is)<[^>]+>`)
 	attrRE             = regexp.MustCompile(`(?i)([a-z_:][-a-z0-9_:]*)\s*=\s*["']([^"']*)["']`)
 	numberRE           = regexp.MustCompile(`(?i)(?:chapter|episode|ep|话|集|卷|vol(?:ume)?)?\s*([0-9]+(?:\.[0-9]+)?)`)
+)
+
+const (
+	fileDownloadWorkers = 2
+	fetchMaxAttempts    = 3
 )
 
 type Config struct {
@@ -318,7 +324,7 @@ func newApp() *App {
 		downloadQueue: make(chan downloadTask, 4096),
 	}
 	app.loadSession()
-	for i := 0; i < 3; i++ {
+	for i := 0; i < fileDownloadWorkers; i++ {
 		go app.downloadWorker()
 	}
 	return app
@@ -2165,28 +2171,46 @@ func (a *App) fetchProgress(ctx context.Context, rawURL string, maxBytes int64, 
 	if err != nil {
 		return nil, "", err
 	}
+	for attempt := 0; attempt < fetchMaxAttempts; attempt++ {
+		data, contentType, retry, fetchErr := a.fetchProgressOnce(ctx, u, maxBytes, progress)
+		if fetchErr == nil || !retry || attempt == fetchMaxAttempts-1 {
+			return data, contentType, fetchErr
+		}
+		timer := time.NewTimer(time.Duration(1<<attempt) * 500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, "", ctx.Err()
+		case <-timer.C:
+		}
+	}
+	return nil, "", errors.New("download retry exhausted")
+}
+
+func (a *App) fetchProgressOnce(ctx context.Context, u *url.URL, maxBytes int64, progress progressFunc) ([]byte, string, bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, "", err
+		return nil, "", false, err
 	}
 	req.Header.Set("User-Agent", "koxmoe-transfer/0.1")
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
 	req.Header.Set("Referer", strings.TrimRight(a.config().UpstreamURL, "/")+"/")
 	resp, err := a.httpClient().Do(req)
 	if err != nil {
-		return nil, "", err
+		return nil, "", retryableFetchError(ctx, err), err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		retry := retryableHTTPStatus(resp.StatusCode)
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<10))
 		message := ""
 		if match := titleRE.FindStringSubmatch(string(detail)); len(match) > 1 {
 			message = cleanText(match[1])
 		}
 		if message != "" {
-			return nil, "", fmt.Errorf("upstream returned %s for %s: %s", resp.Status, u.Path, message)
+			return nil, "", retry, fmt.Errorf("upstream returned %s for %s: %s", resp.Status, u.Path, message)
 		}
-		return nil, "", fmt.Errorf("upstream returned %s for %s", resp.Status, u.Path)
+		return nil, "", retry, fmt.Errorf("upstream returned %s for %s", resp.Status, u.Path)
 	}
 	var body bytes.Buffer
 	reader := io.LimitReader(resp.Body, maxBytes+1)
@@ -2196,7 +2220,7 @@ func (a *App) fetchProgress(ctx context.Context, rawURL string, maxBytes int64, 
 		count, readErr := reader.Read(buffer)
 		if count > 0 {
 			if _, err := body.Write(buffer[:count]); err != nil {
-				return nil, "", err
+				return nil, "", false, err
 			}
 			bytesRead += int64(count)
 			if progress != nil {
@@ -2207,13 +2231,30 @@ func (a *App) fetchProgress(ctx context.Context, rawURL string, maxBytes int64, 
 			break
 		}
 		if readErr != nil {
-			return nil, "", readErr
+			return nil, "", retryableFetchError(ctx, readErr), readErr
 		}
 	}
 	if int64(body.Len()) > maxBytes {
-		return nil, "", fmt.Errorf("response too large: %s", u.Path)
+		return nil, "", false, fmt.Errorf("response too large: %s", u.Path)
 	}
-	return body.Bytes(), resp.Header.Get("Content-Type"), nil
+	return body.Bytes(), resp.Header.Get("Content-Type"), false, nil
+}
+
+func retryableHTTPStatus(status int) bool {
+	switch status {
+	case http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 520, 521, 522, 523, 524:
+		return true
+	default:
+		return false
+	}
+}
+
+func retryableFetchError(ctx context.Context, err error) bool {
+	if err == nil || ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 func parsePage(body []byte, baseURL string) (page, error) {

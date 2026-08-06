@@ -12,7 +12,7 @@ services:
       PROXY_URL: ""
       PROXY_ENABLED: "false"
       SESSION_FILE: /data/kzo-session.json
-      WORKERS: 4
+      WORKERS: 2
     volumes:
       - ./koxmoe-data:/data
       # 把左侧替换成 NAS 主机上的下载目录，右侧固定为容器内下载目录
