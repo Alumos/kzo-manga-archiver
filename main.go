@@ -269,6 +269,7 @@ func main() {
 	mux.HandleFunc("/api/downloaded", app.downloadedHandler)
 	mux.HandleFunc("/api/download", app.downloadHandler)
 	mux.HandleFunc("/api/jobs", app.jobsHandler)
+	mux.HandleFunc("/api/jobs/clear", app.clearJobsHandler)
 	mux.HandleFunc("/api/jobs/retry", app.retryJobHandler)
 	mux.HandleFunc("/api/proxy/test", app.proxyTestHandler)
 	mux.HandleFunc("/api/files", app.filesHandler)
@@ -1037,6 +1038,27 @@ func (a *App) jobsHandler(w http.ResponseWriter, r *http.Request) {
 	a.mu.RUnlock()
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].StartedAt.After(jobs[j].StartedAt) })
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
+func (a *App) clearJobsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.authenticated() {
+		writeError(w, http.StatusUnauthorized, "please log in first")
+		return
+	}
+	a.mu.Lock()
+	removed := 0
+	for id, job := range a.jobs {
+		if job.Status == "completed" {
+			delete(a.jobs, id)
+			removed++
+		}
+	}
+	a.mu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]int{"removed": removed})
 }
 
 func (a *App) retryJobHandler(w http.ResponseWriter, r *http.Request) {

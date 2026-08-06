@@ -85,6 +85,27 @@ func TestSummarizeJobTracksChapterStates(t *testing.T) {
 	}
 }
 
+func TestClearJobsOnlyRemovesCompleted(t *testing.T) {
+	completed := newJob("completed", downloadRequest{ComicName: "已完成", Chapters: []Chapter{{Title: "卷 01"}}})
+	completed.Status = "completed"
+	failed := newJob("failed", downloadRequest{ComicName: "部分失败", Chapters: []Chapter{{Title: "卷 01"}}})
+	failed.Status = "completed_with_errors"
+	queued := newJob("queued", downloadRequest{ComicName: "排队中", Chapters: []Chapter{{Title: "卷 01"}}})
+	app := &App{cfg: Config{Authenticated: true}, jobs: map[string]*Job{
+		completed.ID: completed,
+		failed.ID:    failed,
+		queued.ID:    queued,
+	}}
+	recorder := httptest.NewRecorder()
+	app.clearJobsHandler(recorder, httptest.NewRequest(http.MethodPost, "/api/jobs/clear", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("clear jobs status = %d", recorder.Code)
+	}
+	if len(app.jobs) != 2 || app.jobs[completed.ID] != nil || app.jobs[failed.ID] == nil || app.jobs[queued.ID] == nil {
+		t.Fatalf("clear jobs left unexpected records: %+v", app.jobs)
+	}
+}
+
 func TestBookofVolumeCovers(t *testing.T) {
 	if got, ok := bookofURLForKzoComic("https://kzo.moe/c/11842.htm"); !ok || got != "https://bookof.moe/b/11842.htm" {
 		t.Fatalf("bookof URL = %q, %v", got, ok)

@@ -54,6 +54,7 @@ async function loadAuth() {
   badge.className = `badge ${authenticated ? "success" : "muted"}`;
   $("loginButton").classList.toggle("hidden", authenticated);
   $("logoutButton").classList.toggle("hidden", !authenticated);
+  $("clearCompletedButton").disabled = !authenticated || !state.jobs.some((job) => job.status === "completed");
 }
 
 async function syncLibrary(resetPage = false) {
@@ -390,6 +391,7 @@ async function loadJobs() {
     const active = state.jobs.filter((job) => job.status === "running" || job.status === "queued").length;
     $("jobCount").textContent = active;
     $("heroJobCount").textContent = active;
+    $("clearCompletedButton").disabled = !state.auth.authenticated || !state.jobs.some((job) => job.status === "completed");
     renderJobs();
     refreshDownloaded();
   } catch (_) {}
@@ -405,6 +407,21 @@ function formatBytes(bytes) {
 }
 
 function formatSpeed(bytes) { return bytes ? `${formatBytes(bytes)}/s` : "等待数据…"; }
+
+async function clearCompletedJobs() {
+  const button = $("clearCompletedButton");
+  setLoading(button, true, "清除中…");
+  try {
+    const result = await api("/api/jobs/clear", { method: "POST" });
+    showNotice(result.removed ? `已清除 ${result.removed} 个已完成任务` : "没有可清除的已完成任务");
+    await loadJobs();
+  } catch (error) {
+    showNotice(error.message);
+  } finally {
+    setLoading(button, false);
+    button.disabled = !state.auth.authenticated || !state.jobs.some((job) => job.status === "completed");
+  }
+}
 
 async function retryChapter(jobID, chapterID, button) {
   setLoading(button, true, "排队中…");
@@ -573,6 +590,7 @@ $("searchInput").onkeydown = (event) => { if (event.key === "Enter") { event.pre
 $("categorySelect").onchange = () => { state.category = $("categorySelect").value; syncLibrary(true); };
 $("selectAll").onchange = () => { state.selected = new Set($("selectAll").checked ? state.chapters.filter((chapter) => !chapter.downloaded).map((chapter) => chapter.url) : []); renderChapters(); };
 $("downloadButton").onclick = startDownload;
+$("clearCompletedButton").onclick = clearCompletedJobs;
 $("chaptersButton").onclick = openDownloadView;
 $("backLibraryButton").onclick = () => switchView("library", "back");
 $("backDetailButton").onclick = () => switchView(state.selectedComic ? "detail" : "library", "back");
