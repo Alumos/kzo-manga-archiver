@@ -1,0 +1,19 @@
+services:
+  koxmoe-transfer:
+    image: ghcr.io/OWNER/REPOSITORY:latest
+    container_name: koxmoe-transfer
+    restart: unless-stopped
+    user: "0:0"
+    ports:
+      - "8080:8080"
+    environment:
+      ADDR: 0.0.0.0:8080
+      DOWNLOAD_DIR: /downloads
+      PROXY_URL: ""
+      PROXY_ENABLED: "false"
+      SESSION_FILE: /data/kzo-session.json
+      WORKERS: 4
+    volumes:
+      - ./koxmoe-data:/data
+      # 把左侧替换成 NAS 主机上的下载目录，右侧固定为容器内下载目录
+      - /path/to/your/nas/comics:/downloads

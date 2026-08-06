@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#09090b" />
+    <title>Kozmoe Transfer · Admin</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/admin.js" defer></script>
+  </head>
+  <body>
+    <div class="admin-shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="返回首页"><span class="brand-mark">K</span><span><strong>Kozmoe</strong><small>ADMIN</small></span></a>
+        <span id="adminAuth" class="badge muted">读取中…</span>
+      </header>
+      <main class="admin-container">
+        <div class="admin-intro"><p class="eyebrow">ADMINISTRATION</p><h1>连接与存储</h1><p class="lead">这里维护上游站点、登录账号和下载目录；这些配置不会出现在下载前台。</p></div>
+        <div id="adminNotice" class="notice hidden"></div>
+        <section class="panel">
+          <form id="settingsForm" class="admin-grid">
+            <label>站点地址<input id="upstreamUrl" name="upstreamUrl" type="url" required /></label>
+            <label>登录路径<input id="loginPath" name="loginPath" type="text" required /></label>
+            <label>漫画列表路径<input id="libraryPath" name="libraryPath" type="text" required /></label>
+            <label>并发数<input id="workers" name="workers" type="number" min="1" max="32" /></label>
+            <label class="wide">下载目录<input id="nasDir" name="nasDir" type="text" required /></label>
+            <label>代理地址<input id="proxyUrl" name="proxyUrl" type="url" placeholder="http://192.168.31.3:7890" /></label>
+            <label class="admin-check"><span>代理开关</span><span><input id="proxyEnabled" name="proxyEnabled" type="checkbox" /> 下载请求走代理</span></label>
+            <label>账号邮箱<input id="username" name="username" type="email" autocomplete="username" /></label>
+            <label>账号密码<input id="password" name="password" type="password" autocomplete="current-password" placeholder="只用于本次登录" /></label>
+            <div class="proxy-tools wide"><button id="proxyTest" class="button" type="button">测试 Google 连通性</button><span id="proxyStatus" class="muted-text">保存代理配置后再测试</span></div>
+            <div class="admin-actions wide"><span id="settingsStatus" class="muted-text">密码不会保存</span><button class="button primary" type="submit">保存配置并登录</button></div>
+          </form>
+        </section>
+        <section class="panel file-panel">
+          <div class="panel-head"><div><p class="eyebrow">NAS FILES</p><h2>下载目录</h2></div><span id="fileRoot" class="muted-text">读取中…</span></div>
+          <div class="file-toolbar"><button id="fileUp" class="button" type="button">‹ 上一级</button><span id="filePath" class="muted-text">/</span><button id="fileRefresh" class="button" type="button">刷新</button></div>
+          <div id="fileNotice" class="file-notice hidden"></div>
+          <div id="fileList" class="file-list empty-state">读取中…</div>
+        </section>
+      </main>
+    </div>
+  </body>
+</html>

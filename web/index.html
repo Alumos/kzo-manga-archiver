@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#09090b" />
+    <title>Kozmoe Transfer</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar">
+        <a class="brand" href="/" aria-label="Kozmoe Transfer 首页">
+          <span class="brand-mark">K</span>
+          <span><strong>Kozmoe</strong><small>TRANSFER</small></span>
+        </a>
+        <div class="top-actions">
+          <span id="authBadge" class="badge muted">未登录</span>
+          <button id="loginButton" class="button" type="button">登录</button>
+          <button id="logoutButton" class="button hidden" type="button">退出登录</button>
+          <button id="jobNavButton" class="button" type="button">下载管理 <span id="jobCount">0</span></button>
+          <button id="syncButton" class="button primary" type="button">同步漫画</button>
+        </div>
+      </header>
+
+      <main class="container">
+        <div id="notice" class="notice hidden" role="status"></div>
+        <div id="views" class="view-stack">
+          <section id="libraryView" class="view active" aria-labelledby="libraryHeading">
+            <section class="hero">
+              <div>
+                <p class="eyebrow">PERSONAL LIBRARY</p>
+                <h1>把喜欢的漫画，安静地放进 NAS。</h1>
+                <p class="lead">从你的 KZO 账号读取漫画，查看完整资料，选中章节后并发转存为 EPUB。</p>
+              </div>
+              <div class="hero-stats">
+                <div class="hero-stat"><strong id="comicCount">—</strong><span>当前结果</span></div>
+                <div class="hero-stat"><strong id="heroJobCount">0</strong><span>进行中任务</span></div>
+              </div>
+            </section>
+
+            <section class="panel library-panel">
+              <div class="panel-head library-head">
+                <div><p class="eyebrow">LIBRARY</p><h2 id="libraryHeading">漫画列表</h2></div>
+                <div class="library-controls">
+                  <label><span class="sr-only">漫画分类</span><select id="categorySelect"><option value="">全部分类</option></select></label>
+                  <label class="search"><span class="sr-only">搜索漫画</span><input id="searchInput" type="search" placeholder="搜索漫画…" /></label>
+                  <button id="searchButton" class="button" type="button">搜索</button>
+                </div>
+              </div>
+              <div id="comics" class="comic-grid empty-state">登录后点击“同步漫画”获取列表</div>
+              <div id="libraryPagination" class="pagination"></div>
+            </section>
+          </section>
+
+          <section id="detailView" class="view" aria-labelledby="detailTitle">
+            <div class="view-toolbar">
+              <button id="backLibraryButton" class="button" type="button">‹ 返回漫画列表</button>
+              <span class="view-location">漫画详情</span>
+            </div>
+            <section class="panel detail-panel">
+              <div class="detail-layout">
+                <div class="detail-cover-wrap"><img id="detailCover" class="detail-cover" alt="" /></div>
+                <div class="detail-content">
+                  <div class="detail-title-row">
+                    <div><p class="eyebrow">COMIC INFO</p><h2 id="detailTitle">—</h2><p id="detailAliases" class="aliases"></p></div>
+                    <div class="score-card"><strong id="detailScore">—</strong><span id="detailScoreCount">暂无评分</span></div>
+                  </div>
+                  <div id="detailTags" class="tag-list"></div>
+                  <div id="detailFacts" class="facts"></div>
+                </div>
+              </div>
+              <div class="description-block"><h3>简介</h3><p id="detailDescription">加载资料中…</p></div>
+              <div class="detail-actions"><span class="muted-text">章节将按官网顺序保存到漫画目录</span><button id="chaptersButton" class="button primary" type="button">查看章节并下载</button></div>
+            </section>
+          </section>
+
+          <section id="downloadView" class="view" aria-labelledby="downloadHeading">
+            <div class="view-toolbar">
+              <button id="backDetailButton" class="button" type="button">‹ 返回漫画详情</button>
+              <span class="view-location">章节下载与任务管理</span>
+            </div>
+            <section class="panel chapters-panel">
+              <div class="panel-head chapter-head">
+                <div><p class="eyebrow">CHAPTERS</p><h2 id="downloadHeading">选择章节</h2></div>
+                <div class="chapter-badges"><span id="chapterCount" class="badge muted">0 章</span><span id="selectedCount" class="badge muted">已选 0 章</span></div>
+              </div>
+              <div class="chapter-toolbar"><label class="check-row"><input id="selectAll" type="checkbox" /> 全选当前章节</label><span class="muted-text">文件名保留官网原始卷名 · 全局最多 3 个 EPUB 并行</span></div>
+              <div id="chapters" class="chapter-list empty-state">选择漫画后加载章节</div>
+              <div class="download-bar"><div><strong id="downloadTarget">下载目录 / —</strong><small>下载完成后按漫画名归档</small></div><button id="downloadButton" class="button primary" type="button" disabled>下载选中章节</button></div>
+            </section>
+
+            <section class="panel jobs-panel">
+              <div class="panel-head"><div><p class="eyebrow">DOWNLOADS</p><h2>当前下载任务</h2></div><span class="muted-text">进度、字节量和实时速度</span></div>
+              <div id="jobs" class="jobs-list empty-state">还没有下载任务</div>
+            </section>
+          </section>
+        </div>
+      </main>
+
+      <dialog id="loginDialog" class="login-dialog">
+        <form id="loginForm" method="dialog">
+          <div class="dialog-head"><div><p class="eyebrow">ACCOUNT</p><h2>登录 KZO</h2></div><button id="closeLoginButton" class="icon-button" type="button" aria-label="关闭">×</button></div>
+          <p class="muted-text">密码只用于登录，登录态由服务端保存并持久化。</p>
+          <label>账号邮箱<input id="loginUsername" type="email" autocomplete="username" required /></label>
+          <label>账号密码<input id="loginPassword" type="password" autocomplete="current-password" required /></label>
+          <div class="dialog-actions"><span id="loginStatus" class="muted-text"></span><button class="button primary" type="submit">登录并继续</button></div>
+        </form>
+      </dialog>
+
+      <footer>koxmoe-transfer · 本地运行 · EPUB 输出</footer>
+    </div>
+  </body>
+</html>

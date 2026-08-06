@@ -1,0 +1,6 @@
+.DS_Store
+.kzo-session.json
+downloads/
+koxmoe-data/
+*.epub
+koxmoe-transfer
