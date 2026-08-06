@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -64,6 +65,24 @@ func TestSaveFileCleansTempOnError(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("temporary files remain: %+v", entries)
+	}
+}
+
+func TestFetchProgressRetriesTransientStatus(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = io.WriteString(w, "temporary upstream failure")
+			return
+		}
+		_, _ = io.WriteString(w, "ok")
+	}))
+	defer server.Close()
+	app := &App{cfg: Config{UpstreamURL: server.URL}, client: server.Client()}
+	data, _, err := app.fetchProgress(context.Background(), server.URL, 1024, nil)
+	if err != nil || string(data) != "ok" || calls.Load() != 2 {
+		t.Fatalf("fetch retry = %q, %v, calls=%d", data, err, calls.Load())
 	}
 }
 
