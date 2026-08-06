@@ -51,6 +51,9 @@ var (
 	kzoDetailScoreRE   = regexp.MustCompile(`(?is)<table[^>]*class=["'][^"']*book_score[^"']*["'][^>]*>.*?<font[^>]*>([0-9]+(?:\.[0-9]+)?)</font>.*?([0-9]+)人評價`)
 	kzoDetailDescRE    = regexp.MustCompile(`(?is)<div[^>]*id=["']div_desc_content["'][^>]*>(.*?)</div>`)
 	kzoDetailDescJSRE  = regexp.MustCompile(`(?is)document\.getElementById\(["']div_desc_content["']\)\.innerHTML\s*=\s*"((?:\\.|[^"\\])*)"`)
+	kzoComicPathRE     = regexp.MustCompile(`^/c/([0-9]+)\.htm$`)
+	bookofVolumeDataRE = regexp.MustCompile(`(?i)(?:https?://bookof\.moe)?/data_vol\.php\?h=[^"']+`)
+	bookofVolumeRE     = regexp.MustCompile(`(?i)datainfo-V=([0-9]+),[^,]*,([^,]*),[^,]*,([^,]*),([^",]*)`)
 	kzoListPageRE      = regexp.MustCompile(`^/l/[^/]+/[0-9]+\.htm$`)
 	kzoPageRE          = regexp.MustCompile(`(?is)disp_divpage\s*\((.*?)\)\s*;`)
 	kzoTotalRE         = regexp.MustCompile(`(?is)disp_divpage\s*\(\s*[^,]+,\s*[^,]+,\s*["']?(\d+)`)
@@ -126,6 +129,7 @@ type Chapter struct {
 	URL         string `json:"url"`
 	Order       int    `json:"order"`
 	DownloadURL string `json:"downloadUrl,omitempty"`
+	CoverURL    string `json:"coverUrl,omitempty"`
 	FileName    string `json:"fileName,omitempty"`
 	Downloaded  bool   `json:"downloaded,omitempty"`
 }
@@ -165,6 +169,7 @@ type Job struct {
 	ID         string       `json:"id"`
 	Status     string       `json:"status"`
 	Comic      string       `json:"comic"`
+	CoverURL   string       `json:"coverUrl,omitempty"`
 	Done       int          `json:"done"`
 	Total      int          `json:"total"`
 	Files      []string     `json:"files"`
@@ -184,6 +189,7 @@ type JobChapter struct {
 	Title      string    `json:"title"`
 	Order      int       `json:"order"`
 	Status     string    `json:"status"`
+	CoverURL   string    `json:"coverUrl,omitempty"`
 	Done       int64     `json:"done"`
 	Total      int64     `json:"total"`
 	SpeedBPS   int64     `json:"speedBps"`
@@ -223,6 +229,7 @@ type downloadTask struct {
 type downloadRequest struct {
 	ComicName string    `json:"comicName"`
 	ComicURL  string    `json:"comicUrl"`
+	CoverURL  string    `json:"coverUrl,omitempty"`
 	Category  string    `json:"category,omitempty"`
 	Chapters  []Chapter `json:"chapters"`
 }
@@ -812,7 +819,7 @@ func (a *App) coverHandler(w http.ResponseWriter, r *http.Request) {
 	cfg := a.config()
 	req.Header.Set("User-Agent", "koxmoe-transfer/0.1")
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/*,*/*;q=0.8")
-	req.Header.Set("Referer", strings.TrimRight(cfg.UpstreamURL, "/")+"/")
+	req.Header.Set("Referer", coverReferer(u, cfg.UpstreamURL))
 	response, err := a.httpClient().Do(req)
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
@@ -836,7 +843,15 @@ func allowedCoverHost(u *url.URL, upstream string) bool {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
-	return host == base.Hostname() || host == "kmimg.moex.ink" || strings.HasSuffix(host, ".moex.ink") || strings.HasSuffix(host, ".mixmoe.com")
+	return host == base.Hostname() || host == "kmimg.moex.ink" || strings.HasSuffix(host, ".moex.ink") || strings.HasSuffix(host, ".mixmoe.com") || strings.HasSuffix(host, ".mxomo.com")
+}
+
+func coverReferer(u *url.URL, upstream string) string {
+	host := strings.ToLower(u.Hostname())
+	if strings.HasSuffix(host, ".moex.ink") || strings.HasSuffix(host, ".mxomo.com") || strings.HasSuffix(host, ".mixmoe.com") {
+		return "https://bookof.moe/"
+	}
+	return strings.TrimRight(upstream, "/") + "/"
 }
 
 func (a *App) chaptersHandler(w http.ResponseWriter, r *http.Request) {
@@ -862,15 +877,16 @@ func (a *App) chaptersHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	category := strings.TrimSpace(r.URL.Query().Get("category"))
 	if comicName := strings.TrimSpace(r.URL.Query().Get("comicName")); comicName != "" {
-		category := a.resolveCategory(r.Context(), comicURL, r.URL.Query().Get("category"))
+		category = a.resolveCategory(r.Context(), comicURL, category)
 		chapters, err = annotateDownloaded(a.config(), category, comicName, chapters)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "cannot inspect download directory: "+err.Error())
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"chapters": chapters})
+	writeJSON(w, http.StatusOK, map[string]any{"chapters": chapters, "category": category})
 }
 
 func (a *App) downloadedHandler(w http.ResponseWriter, r *http.Request) {
@@ -1549,7 +1565,98 @@ func (a *App) scanKzoChapters(ctx context.Context, comicURL string) ([]Chapter, 
 	for i := range chapters {
 		chapters[i].Order = i + 1
 	}
-	return chapters, nil
+	return a.scanBookofCovers(ctx, comicURL, chapters), nil
+}
+
+func (a *App) scanBookofCovers(ctx context.Context, comicURL string, chapters []Chapter) []Chapter {
+	bookURL, ok := bookofURLForKzoComic(comicURL)
+	if !ok {
+		return chapters
+	}
+	coverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	pageBody, err := a.fetchBookof(coverCtx, bookURL)
+	if err != nil {
+		return chapters
+	}
+	dataPath := bookofVolumeDataRE.FindString(string(pageBody))
+	if dataPath == "" {
+		return chapters
+	}
+	dataBody, err := a.fetchBookof(coverCtx, resolveURL(bookURL, dataPath))
+	if err != nil {
+		return chapters
+	}
+	return applyBookofCovers(a.config(), dataBody, chapters)
+}
+
+func applyBookofCovers(cfg Config, dataBody []byte, chapters []Chapter) []Chapter {
+	byTitle := make(map[string]string)
+	byOrder := make(map[int]string)
+	for _, match := range bookofVolumeRE.FindAllStringSubmatch(string(dataBody), -1) {
+		if len(match) < 5 {
+			continue
+		}
+		order, _ := strconv.Atoi(match[1])
+		title := cleanText(match[2])
+		cover := html.UnescapeString(strings.TrimSpace(match[3]))
+		if u, urlErr := validHTTPURL(cover); urlErr != nil || !allowedCoverHost(u, cfg.UpstreamURL) {
+			cover = ""
+		}
+		if title != "" && cover != "" {
+			byTitle[normalizeVolumeTitle(title)] = cover
+		}
+		if order > 0 && cover != "" {
+			byOrder[order] = cover
+		}
+	}
+	for index := range chapters {
+		cover := byTitle[normalizeVolumeTitle(chapters[index].Title)]
+		if cover == "" {
+			cover = byOrder[index+1]
+		}
+		chapters[index].CoverURL = cover
+	}
+	return chapters
+}
+
+func bookofURLForKzoComic(comicURL string) (string, bool) {
+	u, err := validHTTPURL(comicURL)
+	if err != nil {
+		return "", false
+	}
+	match := kzoComicPathRE.FindStringSubmatch(u.Path)
+	if len(match) < 2 {
+		return "", false
+	}
+	return "https://bookof.moe/b/" + match[1] + ".htm", true
+}
+
+func normalizeVolumeTitle(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), "")
+}
+
+func (a *App) fetchBookof(ctx context.Context, rawURL string) ([]byte, error) {
+	u, err := validHTTPURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "koxmoe-transfer/0.1")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,*/*;q=0.8")
+	req.Header.Set("Referer", "https://bookof.moe/")
+	response, err := a.httpClient().Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, fmt.Errorf("bookof returned %s", response.Status)
+	}
+	return io.ReadAll(io.LimitReader(response.Body, 24<<20))
 }
 
 func (a *App) getPage(ctx context.Context, rawURL string) (page, error) {
@@ -1565,6 +1672,7 @@ func newJob(id string, input downloadRequest) *Job {
 		ID:        id,
 		Status:    "queued",
 		Comic:     safeName(input.ComicName),
+		CoverURL:  input.CoverURL,
 		Total:     len(input.Chapters),
 		StartedAt: time.Now(),
 		request:   input,
@@ -1572,11 +1680,12 @@ func newJob(id string, input downloadRequest) *Job {
 	}
 	for index, chapter := range input.Chapters {
 		job.Chapters[index] = JobChapter{
-			ID:      strconv.Itoa(index),
-			Title:   chapter.Title,
-			Order:   chapter.Order,
-			Status:  "queued",
-			chapter: chapter,
+			ID:       strconv.Itoa(index),
+			Title:    chapter.Title,
+			Order:    chapter.Order,
+			Status:   "queued",
+			CoverURL: chapter.CoverURL,
+			chapter:  chapter,
 		}
 	}
 	return job

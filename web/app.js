@@ -1,4 +1,4 @@
-const state = { comics: [], categories: [], page: 1, totalPages: 1, total: 0, search: "", category: "", selectedComic: null, detail: null, chapters: [], selected: new Set(), auth: {}, jobs: [], openJobs: new Set(), downloadedRefreshPending: false, view: "library", transition: 0 };
+const state = { comics: [], categories: [], page: 1, totalPages: 1, total: 0, search: "", category: "", selectedComic: null, detail: null, chapters: [], downloadCategory: "", selected: new Set(), auth: {}, jobs: [], openJobs: new Set(), closedJobs: new Set(), downloadedRefreshPending: false, view: "library", transition: 0 };
 
 const $ = (id) => document.getElementById(id);
 
@@ -75,6 +75,7 @@ async function syncLibrary(resetPage = false) {
     state.selectedComic = null;
     state.detail = null;
     state.chapters = [];
+    state.downloadCategory = "";
     state.selected.clear();
     renderCategories();
     renderComics();
@@ -163,6 +164,7 @@ async function selectComic(comic) {
   state.selectedComic = comic;
   state.detail = null;
   state.chapters = [];
+  state.downloadCategory = "";
   state.selected.clear();
   renderDetailShell();
   switchView("detail", "forward");
@@ -243,6 +245,7 @@ async function loadChapters() {
     const params = new URLSearchParams({ url: state.selectedComic.url, comicName: state.selectedComic.title, category: state.detail?.tags?.[0] || "" });
     const data = await api("/api/chapters?" + params);
     state.chapters = data.chapters || [];
+    state.downloadCategory = data.category || state.detail?.tags?.[0] || "未分类";
     state.selected = new Set(state.chapters.filter((chapter) => !chapter.downloaded).map((chapter) => chapter.url));
     renderChapters();
   } catch (error) {
@@ -258,7 +261,7 @@ async function refreshDownloaded() {
   if (state.downloadedRefreshPending || state.view !== "download" || !state.selectedComic || !state.chapters.length) return;
   state.downloadedRefreshPending = true;
   try {
-    const params = new URLSearchParams({ url: state.selectedComic.url, comicName: state.selectedComic.title, category: state.detail?.tags?.[0] || "" });
+    const params = new URLSearchParams({ url: state.selectedComic.url, comicName: state.selectedComic.title, category: state.downloadCategory || state.detail?.tags?.[0] || "" });
     const data = await api("/api/downloaded?" + params);
     const files = new Set(data.files || []);
     let changed = false;
@@ -293,7 +296,7 @@ function renderChapters() {
   $("selectedCount").textContent = `已选 ${state.selected.size} 章`;
   $("selectAll").checked = downloadable.length > 0 && state.selected.size === downloadable.length;
   $("downloadButton").disabled = !state.selectedComic || state.selected.size === 0;
-  $("downloadTarget").textContent = `下载目录 / ${state.detail?.tags?.[0] || "未分类"} / ${state.selectedComic?.title || "—"}`;
+  $("downloadTarget").textContent = `下载目录 / ${state.downloadCategory || state.detail?.tags?.[0] || "未分类"} / ${state.selectedComic?.title || "—"}`;
   if (!state.chapters.length) {
     root.className = "chapter-list empty-state";
     root.textContent = state.selectedComic ? "没有找到章节，检查列表路径或站点结构" : "从漫画详情页进入章节下载";
@@ -330,7 +333,7 @@ async function startDownload() {
   const button = $("downloadButton");
   setLoading(button, true, "已加入任务…");
   try {
-    const result = await api("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ comicName: state.selectedComic.title, comicUrl: state.selectedComic.url, category: state.detail?.tags?.[0] || "", chapters: state.chapters.filter((chapter) => state.selected.has(chapter.url) && !chapter.downloaded) }) });
+    const result = await api("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ comicName: state.selectedComic.title, comicUrl: state.selectedComic.url, coverUrl: state.selectedComic.coverUrl || state.detail?.coverUrl || "", category: state.downloadCategory || state.detail?.tags?.[0] || "", chapters: state.chapters.filter((chapter) => state.selected.has(chapter.url) && !chapter.downloaded) }) });
     if (result.status === "skipped") showNotice(result.message || "所选章节都已下载");
     await loadJobs();
   } catch (error) {
@@ -415,6 +418,28 @@ async function retryChapter(jobID, chapterID, button) {
   }
 }
 
+function createJobCover(url, alt, className, emptyText) {
+  const frame = document.createElement("div");
+  frame.className = `job-cover ${className || ""}`;
+  const showPlaceholder = () => {
+    frame.replaceChildren();
+    frame.classList.add("placeholder");
+    frame.textContent = emptyText;
+  };
+  if (!url) {
+    showPlaceholder();
+    return frame;
+  }
+  const image = document.createElement("img");
+  image.loading = "lazy";
+  image.decoding = "async";
+  image.alt = alt;
+  image.src = "/api/cover?url=" + encodeURIComponent(url);
+  image.onerror = showPlaceholder;
+  frame.append(image);
+  return frame;
+}
+
 function renderJobs() {
   const root = $("jobs");
   const openJobs = new Set([...root.querySelectorAll("details[data-job-id][open]")].map((item) => item.dataset.jobId));
@@ -430,22 +455,47 @@ function renderJobs() {
     item.className = "job-group";
     item.dataset.jobId = job.id;
     const active = job.status === "running" || job.status === "queued";
-    item.open = state.openJobs.has(job.id) || openJobs.has(job.id) || active;
-    item.ontoggle = () => item.open ? state.openJobs.add(job.id) : state.openJobs.delete(job.id);
+    item.open = state.openJobs.has(job.id) || openJobs.has(job.id) || (active && !state.closedJobs.has(job.id));
+    item.ontoggle = () => {
+      if (item.open) {
+        state.openJobs.add(job.id);
+        state.closedJobs.delete(job.id);
+      } else {
+        state.openJobs.delete(job.id);
+        state.closedJobs.add(job.id);
+      }
+    };
+
     const summary = document.createElement("summary");
     summary.className = "job-summary";
-    const top = document.createElement("div");
-    top.className = "job-top";
-    const name = document.createElement("span");
+    const summaryMain = document.createElement("div");
+    summaryMain.className = "job-summary-main";
+    summaryMain.append(createJobCover(job.coverUrl, job.comic, "job-main-cover", "暂无主封面"));
+    const summaryInfo = document.createElement("div");
+    summaryInfo.className = "job-summary-info";
+    const titleRow = document.createElement("div");
+    titleRow.className = "job-title-row";
+    const name = document.createElement("strong");
     name.textContent = job.comic;
     const status = document.createElement("span");
-    status.className = "muted-text";
+    status.className = `job-status ${job.status}`;
     status.textContent = jobStatus(job);
-    top.append(name, status);
-    summary.append(top);
+    titleRow.append(name, status);
+    const summaryMeta = document.createElement("span");
+    summaryMeta.className = "job-summary-meta";
+    summaryMeta.textContent = `${job.done}/${job.total} 卷 · ${job.files?.length || 0} 个 EPUB · ${formatSpeed(job.speedBps)}`;
+    summaryInfo.append(titleRow, summaryMeta);
+    summaryMain.append(summaryInfo);
+    const toggle = document.createElement("span");
+    toggle.className = "job-toggle";
+    toggle.innerHTML = '<span class="job-toggle-icon">⌄</span><span>展开</span>';
+    summary.append(summaryMain, toggle);
     item.append(summary);
+
     const body = document.createElement("div");
     body.className = "job-body";
+    const overview = document.createElement("div");
+    overview.className = "job-overview";
     const progress = document.createElement("div");
     progress.className = "progress";
     const fill = document.createElement("i");
@@ -455,16 +505,21 @@ function renderJobs() {
     const meta = document.createElement("div");
     meta.className = "job-meta";
     const chapterMeta = document.createElement("span");
-    chapterMeta.textContent = `${job.done}/${job.total} 章 · ${job.files?.length || 0} 个 EPUB`;
+    chapterMeta.textContent = `${job.done}/${job.total} 卷已结束`;
     const byteMeta = document.createElement("span");
     byteMeta.textContent = job.bytesTotal > 0 ? `${formatBytes(job.bytesDone)} / ${formatBytes(job.bytesTotal)} · ${formatSpeed(job.speedBps)}` : formatSpeed(job.speedBps);
     meta.append(chapterMeta, byteMeta);
-    body.append(progress, meta);
+    overview.append(progress, meta);
+    body.append(overview);
+
     const chapters = document.createElement("div");
     chapters.className = "job-chapters";
     (job.chapters || []).forEach((chapter) => {
       const row = document.createElement("div");
       row.className = "job-chapter";
+      row.append(createJobCover(chapter.coverUrl, chapter.title, "job-volume-cover", "该卷暂无封面"));
+      const content = document.createElement("div");
+      content.className = "job-chapter-content";
       const info = document.createElement("div");
       info.className = "job-chapter-info";
       const title = document.createElement("strong");
@@ -479,22 +534,27 @@ function renderJobs() {
       const chapterFraction = chapter.total > 0 ? chapter.done / chapter.total : (chapter.status === "completed" ? 1 : 0);
       chapterFill.style.width = `${Math.min(100, Math.round(chapterFraction * 100))}%`;
       chapterProgress.append(chapterFill);
-      const chapterMeta = document.createElement("div");
+      const footer = document.createElement("div");
+      footer.className = "job-chapter-footer";
+      const chapterMeta = document.createElement("span");
       chapterMeta.className = "job-chapter-meta";
       chapterMeta.textContent = chapter.total > 0 ? `${formatBytes(chapter.done)} / ${formatBytes(chapter.total)} · ${formatSpeed(chapter.speedBps)}` : formatSpeed(chapter.speedBps);
-      row.append(info, chapterProgress, chapterMeta);
+      footer.append(chapterMeta);
       if (chapter.status === "failed") {
-        const failure = document.createElement("div");
-        failure.className = "failure";
-        failure.textContent = chapter.error || "下载失败";
-        row.append(failure);
         const retry = document.createElement("button");
         retry.className = "button retry-button";
         retry.type = "button";
         retry.textContent = "重试";
         retry.onclick = (event) => { event.preventDefault(); event.stopPropagation(); retryChapter(job.id, chapter.id, retry); };
-        row.append(retry);
+        footer.append(retry);
+        const failure = document.createElement("div");
+        failure.className = "failure";
+        failure.textContent = chapter.error || "下载失败";
+        content.append(info, chapterProgress, footer, failure);
+      } else {
+        content.append(info, chapterProgress, footer);
       }
+      row.append(content);
       chapters.append(row);
     });
     body.append(chapters);

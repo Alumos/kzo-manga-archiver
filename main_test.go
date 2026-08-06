@@ -85,6 +85,24 @@ func TestSummarizeJobTracksChapterStates(t *testing.T) {
 	}
 }
 
+func TestBookofVolumeCovers(t *testing.T) {
+	if got, ok := bookofURLForKzoComic("https://kzo.moe/c/11842.htm"); !ok || got != "https://bookof.moe/b/11842.htm" {
+		t.Fatalf("bookof URL = %q, %v", got, ok)
+	}
+	chapters := []Chapter{{Title: "卷 01", Order: 1}, {Title: "卷 02", Order: 2}, {Title: "卷 03", Order: 3}}
+	data := []byte(`
+<script>parent.postMessage("datainfo-V=1,卷,卷 01,0,https://kmimg.mxomo.com/cover/one.jpg?sign=1,https://kmimg.mxomo.com/cover/one-full.jpg?sign=1,*");</script>
+<script>parent.postMessage("datainfo-V=2,卷,卷 02,0,,https://kmimg.mxomo.com/cover/two-full.jpg?sign=2,*");</script>`)
+	got := applyBookofCovers(Config{UpstreamURL: "https://kzo.moe"}, data, chapters)
+	if got[0].CoverURL == "" || got[1].CoverURL != "" || got[2].CoverURL != "" {
+		t.Fatalf("volume covers = %+v", got)
+	}
+	coverURL, _ := url.Parse("https://kmimg.mxomo.com/cover/sigl/one.jpg")
+	if !allowedCoverHost(coverURL, "https://kzo.moe") || coverReferer(coverURL, "https://kzo.moe") != "https://bookof.moe/" {
+		t.Fatalf("bookof cover proxy rules rejected the CDN URL")
+	}
+}
+
 func TestProxyConfiguration(t *testing.T) {
 	proxyURL, err := parseProxyURL("http://192.168.31.3:7890")
 	if err != nil || proxyURL.Host != "192.168.31.3:7890" {
