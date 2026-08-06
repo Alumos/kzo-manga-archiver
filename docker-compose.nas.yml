@@ -1,0 +1,18 @@
+services:
+  koxmoe-transfer:
+    image: ghcr.io/alumos/kzo-manga-archiver:latest
+    container_name: koxmoe-transfer
+    restart: unless-stopped
+    user: "0:0"
+    ports:
+      - "7766:8080"
+    environment:
+      ADDR: 0.0.0.0:8080
+      DOWNLOAD_DIR: /downloads
+      SESSION_FILE: /data/kzo-session.json
+      PROXY_URL: ""
+      PROXY_ENABLED: "false"
+      WORKERS: "4"
+    volumes:
+      - ./koxmoe-data:/data
+      - "/volume5/漫画:/downloads"

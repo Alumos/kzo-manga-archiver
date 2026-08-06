@@ -111,20 +111,45 @@ input:focus, select:focus { border-color: var(--ring); box-shadow: 0 0 0 3px rgb
 .chapter-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); min-height: 180px; max-height: 560px; overflow: auto; padding: 0 22px 10px; column-gap: 24px; }
 .chapter-row { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 11px 0; border-bottom: 1px solid #1f1f22; font-size: 13px; }
 .chapter-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chapter-row.downloaded { color: var(--muted-2); }
+.chapter-row.downloaded input { opacity: .45; }
 .chapter-order { width: 50px; flex: 0 0 50px; color: var(--muted-2); font-size: 10px; }
+.chapter-status { margin-left: auto; flex: 0 0 auto; font-size: 10px; }
+.chapter-status.downloaded { color: #86efac; }
+.chapter-status.pending { color: var(--muted-2); }
 .muted-text { color: var(--muted); font-size: 12px; }
 .download-bar { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 16px 22px; border-top: 1px solid var(--border); }
 .download-bar strong, .download-bar small { display: block; overflow: hidden; max-width: 390px; text-overflow: ellipsis; white-space: nowrap; }
 .download-bar strong { font-size: 12px; }
 .download-bar small { margin-top: 4px; color: var(--muted-2); font-size: 10px; }
 .jobs-list { padding: 8px 22px 18px; }
-.job { padding: 14px 0; border-bottom: 1px solid #1f1f22; }
-.job:last-child { border-bottom: 0; }
+.job-group { border-bottom: 1px solid #1f1f22; }
+.job-group:last-child { border-bottom: 0; }
+.job-group summary { list-style: none; }
+.job-group summary::-webkit-details-marker { display: none; }
+.job-summary { cursor: pointer; padding: 14px 0 9px; }
+.job-summary::before { display: inline-block; width: 16px; color: var(--muted-2); content: "＋"; }
+.job-group[open] .job-summary::before { content: "－"; }
+.job-summary .job-top { display: inline-flex; width: calc(100% - 20px); vertical-align: top; }
+.job-body { padding: 0 0 14px 16px; }
 .job-top { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 9px; font-size: 13px; }
 .job-top span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .progress { height: 6px; overflow: hidden; border-radius: 99px; background: #27272a; }
 .progress i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #a1a1aa, #fafafa); transition: width .25s; }
 .job-meta { display: flex; justify-content: space-between; gap: 10px; margin-top: 7px; color: var(--muted-2); font-size: 11px; }
+.job-chapters { margin-top: 12px; border-top: 1px solid #1f1f22; }
+.job-chapter { position: relative; padding: 11px 0; border-bottom: 1px solid #1f1f22; }
+.job-chapter:last-child { border-bottom: 0; }
+.job-chapter-info { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; }
+.job-chapter-info strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.chapter-job-status { flex: 0 0 auto; font-size: 10px; }
+.chapter-job-status.queued { color: var(--muted-2); }
+.chapter-job-status.running { color: #fde68a; }
+.chapter-job-status.completed { color: #86efac; }
+.chapter-job-status.failed { color: #fca5a5; }
+.chapter-progress { height: 4px; }
+.job-chapter-meta { margin-top: 6px; color: var(--muted-2); font-size: 10px; }
+.retry-button { min-height: 28px; margin-top: 8px; padding: 4px 10px; font-size: 11px; }
 .failure { margin-top: 7px; color: #fca5a5; font-size: 11px; line-height: 1.5; }
 .notice { margin-bottom: 18px; padding: 11px 14px; border: 1px solid #7f1d1d; border-radius: 9px; background: #1c0b0b; color: #fca5a5; font-size: 13px; }
 .notice.hidden { display: none; }

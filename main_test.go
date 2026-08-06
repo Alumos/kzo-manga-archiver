@@ -38,6 +38,53 @@ func TestChapterOutput(t *testing.T) {
 	}
 }
 
+func TestDownloadedChapterMarker(t *testing.T) {
+	cfg := Config{NASDir: t.TempDir()}
+	dir, filename := chapterOutput(cfg, "愛情", "測試漫畫", "卷 01")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, filename), []byte("epub"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	chapters, err := annotateDownloaded(cfg, "愛情", "測試漫畫", []Chapter{{Title: "卷 01", Order: 1}})
+	if err != nil || len(chapters) != 1 || !chapters[0].Downloaded || chapters[0].FileName != filename {
+		t.Fatalf("download marker = %+v, err = %v", chapters, err)
+	}
+}
+
+func TestSaveFileCleansTempOnError(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := saveFile(dir, "book.epub", func(*os.File) error { return io.ErrUnexpectedEOF }); err == nil {
+		t.Fatal("saveFile should return the write error")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("temporary files remain: %+v", entries)
+	}
+}
+
+func TestSummarizeJobTracksChapterStates(t *testing.T) {
+	job := newJob("1", downloadRequest{ComicName: "測試漫畫", Chapters: []Chapter{{Title: "卷 01"}, {Title: "卷 02"}}})
+	job.Chapters[0].Status = "completed"
+	job.Chapters[0].File = "/downloads/卷01.epub"
+	job.Chapters[1].Status = "failed"
+	job.Chapters[1].Error = "upstream error"
+	summarizeJob(job)
+	if job.Status != "completed_with_errors" || job.Done != 2 || len(job.Files) != 1 || len(job.Failures) != 1 {
+		t.Fatalf("job summary = %+v", job)
+	}
+	job.Chapters[1].Status = "queued"
+	job.Chapters[1].Error = ""
+	summarizeJob(job)
+	if job.Status != "queued" || job.Done != 1 {
+		t.Fatalf("queued retry summary = %+v", job)
+	}
+}
+
 func TestProxyConfiguration(t *testing.T) {
 	proxyURL, err := parseProxyURL("http://192.168.31.3:7890")
 	if err != nil || proxyURL.Host != "192.168.31.3:7890" {

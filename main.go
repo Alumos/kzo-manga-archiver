@@ -126,6 +126,8 @@ type Chapter struct {
 	URL         string `json:"url"`
 	Order       int    `json:"order"`
 	DownloadURL string `json:"downloadUrl,omitempty"`
+	FileName    string `json:"fileName,omitempty"`
+	Downloaded  bool   `json:"downloaded,omitempty"`
 }
 
 type link struct {
@@ -160,19 +162,36 @@ type libraryResult struct {
 }
 
 type Job struct {
+	ID         string       `json:"id"`
+	Status     string       `json:"status"`
+	Comic      string       `json:"comic"`
+	Done       int          `json:"done"`
+	Total      int          `json:"total"`
+	Files      []string     `json:"files"`
+	Failures   []string     `json:"failures"`
+	Error      string       `json:"error,omitempty"`
+	BytesDone  int64        `json:"bytesDone"`
+	BytesTotal int64        `json:"bytesTotal"`
+	SpeedBPS   int64        `json:"speedBps"`
+	StartedAt  time.Time    `json:"startedAt"`
+	FinishedAt time.Time    `json:"finishedAt,omitempty"`
+	Chapters   []JobChapter `json:"chapters"`
+	request    downloadRequest
+}
+
+type JobChapter struct {
 	ID         string    `json:"id"`
+	Title      string    `json:"title"`
+	Order      int       `json:"order"`
 	Status     string    `json:"status"`
-	Comic      string    `json:"comic"`
-	Done       int       `json:"done"`
-	Total      int       `json:"total"`
-	Files      []string  `json:"files"`
-	Failures   []string  `json:"failures"`
-	Error      string    `json:"error,omitempty"`
-	BytesDone  int64     `json:"bytesDone"`
-	BytesTotal int64     `json:"bytesTotal"`
+	Done       int64     `json:"done"`
+	Total      int64     `json:"total"`
 	SpeedBPS   int64     `json:"speedBps"`
-	StartedAt  time.Time `json:"startedAt"`
+	File       string    `json:"file,omitempty"`
+	Error      string    `json:"error,omitempty"`
+	StartedAt  time.Time `json:"startedAt,omitempty"`
 	FinishedAt time.Time `json:"finishedAt,omitempty"`
+	chapter    Chapter
 }
 
 type FileEntry struct {
@@ -185,12 +204,20 @@ type FileEntry struct {
 }
 
 type App struct {
-	mu        sync.RWMutex
-	cfg       Config
-	jobs      map[string]*Job
-	client    *http.Client
-	fileSlots chan struct{}
-	fileMu    sync.Mutex
+	mu            sync.RWMutex
+	cfg           Config
+	jobs          map[string]*Job
+	client        *http.Client
+	downloadQueue chan downloadTask
+	queueMu       sync.Mutex
+	fileMu        sync.Mutex
+}
+
+type downloadTask struct {
+	JobID     string
+	ChapterID string
+	Request   downloadRequest
+	Chapter   Chapter
 }
 
 type downloadRequest struct {
@@ -232,8 +259,10 @@ func main() {
 	mux.HandleFunc("/api/comic", app.comicHandler)
 	mux.HandleFunc("/api/cover", app.coverHandler)
 	mux.HandleFunc("/api/chapters", app.chaptersHandler)
+	mux.HandleFunc("/api/downloaded", app.downloadedHandler)
 	mux.HandleFunc("/api/download", app.downloadHandler)
 	mux.HandleFunc("/api/jobs", app.jobsHandler)
+	mux.HandleFunc("/api/jobs/retry", app.retryJobHandler)
 	mux.HandleFunc("/api/proxy/test", app.proxyTestHandler)
 	mux.HandleFunc("/api/files", app.filesHandler)
 	mux.HandleFunc("/api/files/rename", app.renameFileHandler)
@@ -275,11 +304,15 @@ func newApp() *App {
 			Username:     os.Getenv("KZO_USERNAME"),
 			Workers:      workers,
 		},
-		jobs:      make(map[string]*Job),
-		client:    buildHTTPClient(Config{ProxyURL: strings.TrimSpace(os.Getenv("PROXY_URL")), ProxyEnabled: proxyEnabled}, jar),
-		fileSlots: make(chan struct{}, 3),
+		jobs:   make(map[string]*Job),
+		client: buildHTTPClient(Config{ProxyURL: strings.TrimSpace(os.Getenv("PROXY_URL")), ProxyEnabled: proxyEnabled}, jar),
+		// ponytail: in-memory FIFO; persist jobs only when restart-resume is required.
+		downloadQueue: make(chan downloadTask, 4096),
 	}
 	app.loadSession()
+	for i := 0; i < 3; i++ {
+		go app.downloadWorker()
+	}
 	return app
 }
 
@@ -829,7 +862,48 @@ func (a *App) chaptersHandler(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
+	if comicName := strings.TrimSpace(r.URL.Query().Get("comicName")); comicName != "" {
+		category := a.resolveCategory(r.Context(), comicURL, r.URL.Query().Get("category"))
+		chapters, err = annotateDownloaded(a.config(), category, comicName, chapters)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "cannot inspect download directory: "+err.Error())
+			return
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"chapters": chapters})
+}
+
+func (a *App) downloadedHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.authenticated() {
+		writeError(w, http.StatusUnauthorized, "please log in first")
+		return
+	}
+	comicName := strings.TrimSpace(r.URL.Query().Get("comicName"))
+	if comicName == "" {
+		writeError(w, http.StatusBadRequest, "comicName is required")
+		return
+	}
+	comicURL := r.URL.Query().Get("url")
+	if comicURL != "" && !sameHost(comicURL, a.config().UpstreamURL) {
+		writeError(w, http.StatusBadRequest, "url must belong to the configured upstream")
+		return
+	}
+	category := a.resolveCategory(r.Context(), comicURL, r.URL.Query().Get("category"))
+	files, err := downloadedFiles(a.config(), category, comicName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "cannot inspect download directory: "+err.Error())
+		return
+	}
+	names := make([]string, 0, len(files))
+	for name := range files {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	writeJSON(w, http.StatusOK, map[string]any{"files": names})
 }
 
 func (a *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
@@ -879,25 +953,55 @@ func (a *App) downloadHandler(w http.ResponseWriter, r *http.Request) {
 			input.Chapters[i].Order = i + 1
 		}
 	}
-	input.Category = strings.TrimSpace(input.Category)
-	if input.Category == "" && isKzoURL(a.config().UpstreamURL) {
-		if body, _, fetchErr := a.fetch(r.Context(), input.ComicURL, 24<<20); fetchErr == nil {
-			if detail, parseErr := parseComicDetail(body, input.ComicURL); parseErr == nil && len(detail.Tags) > 0 {
-				input.Category = detail.Tags[0]
-			}
-		}
+	input.Category = a.resolveCategory(r.Context(), input.ComicURL, input.Category)
+	files, err := downloadedFiles(a.config(), input.Category, input.ComicName)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "cannot inspect download directory: "+err.Error())
+		return
 	}
-	if input.Category == "" {
-		input.Category = "未分类"
+	pending := input.Chapters[:0]
+	skipped := 0
+	for _, chapter := range input.Chapters {
+		_, filename := chapterOutput(a.config(), input.Category, input.ComicName, chapter.Title)
+		if files[filename] {
+			skipped++
+			continue
+		}
+		pending = append(pending, chapter)
+	}
+	input.Chapters = pending
+	if len(input.Chapters) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"status": "skipped", "skipped": skipped, "message": "所选章节都已下载"})
+		return
 	}
 
 	id := fmt.Sprintf("%d", time.Now().UnixNano())
-	job := &Job{ID: id, Status: "queued", Comic: safeName(input.ComicName), Total: len(input.Chapters), StartedAt: time.Now()}
+	job := newJob(id, input)
 	a.mu.Lock()
 	a.jobs[id] = job
 	a.mu.Unlock()
-	go a.runJob(id, input)
-	writeJSON(w, http.StatusAccepted, job)
+	tasks := make([]downloadTask, len(input.Chapters))
+	for index, chapter := range input.Chapters {
+		tasks[index] = downloadTask{JobID: id, ChapterID: job.Chapters[index].ID, Request: input, Chapter: chapter}
+	}
+	a.enqueueTasks(tasks)
+	snapshot, _ := a.jobSnapshot(id)
+	writeJSON(w, http.StatusAccepted, snapshot)
+}
+
+func (a *App) resolveCategory(ctx context.Context, comicURL, category string) string {
+	category = strings.TrimSpace(category)
+	if category == "" && isKzoURL(a.config().UpstreamURL) && comicURL != "" {
+		if body, _, fetchErr := a.fetch(ctx, comicURL, 24<<20); fetchErr == nil {
+			if detail, parseErr := parseComicDetail(body, comicURL); parseErr == nil && len(detail.Tags) > 0 {
+				category = detail.Tags[0]
+			}
+		}
+	}
+	if category == "" {
+		return "未分类"
+	}
+	return category
 }
 
 func (a *App) jobsHandler(w http.ResponseWriter, r *http.Request) {
@@ -911,11 +1015,78 @@ func (a *App) jobsHandler(w http.ResponseWriter, r *http.Request) {
 		copy := *job
 		copy.Files = append([]string(nil), job.Files...)
 		copy.Failures = append([]string(nil), job.Failures...)
+		copy.Chapters = append([]JobChapter(nil), job.Chapters...)
 		jobs = append(jobs, copy)
 	}
 	a.mu.RUnlock()
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].StartedAt.After(jobs[j].StartedAt) })
 	writeJSON(w, http.StatusOK, map[string]any{"jobs": jobs})
+}
+
+func (a *App) retryJobHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		return
+	}
+	if !a.authenticated() {
+		writeError(w, http.StatusUnauthorized, "please log in first")
+		return
+	}
+	var input struct {
+		JobID     string `json:"jobId"`
+		ChapterID string `json:"chapterId"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&input); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid retry request")
+		return
+	}
+	a.mu.Lock()
+	job := a.jobs[input.JobID]
+	if job == nil {
+		a.mu.Unlock()
+		writeError(w, http.StatusNotFound, "job not found")
+		return
+	}
+	var chapter *JobChapter
+	for index := range job.Chapters {
+		if job.Chapters[index].ID == input.ChapterID {
+			chapter = &job.Chapters[index]
+			break
+		}
+	}
+	if chapter == nil {
+		a.mu.Unlock()
+		writeError(w, http.StatusNotFound, "chapter not found")
+		return
+	}
+	if chapter.Status != "failed" {
+		a.mu.Unlock()
+		writeError(w, http.StatusConflict, "only failed chapters can be retried")
+		return
+	}
+	chapter.Status = "queued"
+	chapter.Done = 0
+	chapter.Total = 0
+	chapter.SpeedBPS = 0
+	chapter.File = ""
+	chapter.Error = ""
+	chapter.StartedAt = time.Time{}
+	chapter.FinishedAt = time.Time{}
+	job.FinishedAt = time.Time{}
+	summarizeJob(job)
+	task := downloadTask{JobID: job.ID, ChapterID: chapter.ID, Request: job.request, Chapter: chapter.chapter}
+	a.mu.Unlock()
+	a.enqueueTasks([]downloadTask{task})
+	snapshot, _ := a.jobSnapshot(input.JobID)
+	writeJSON(w, http.StatusAccepted, snapshot)
+}
+
+func (a *App) enqueueTasks(tasks []downloadTask) {
+	a.queueMu.Lock()
+	defer a.queueMu.Unlock()
+	for _, task := range tasks {
+		a.downloadQueue <- task
+	}
 }
 
 func (a *App) proxyTestHandler(w http.ResponseWriter, r *http.Request) {
@@ -1389,88 +1560,140 @@ func (a *App) getPage(ctx context.Context, rawURL string) (page, error) {
 	return parsePage(body, rawURL)
 }
 
-func (a *App) runJob(id string, input downloadRequest) {
-	cfg := a.config()
-	a.setJob(id, func(job *Job) { job.Status = "running" })
-	if err := os.MkdirAll(downloadDir(cfg, input.Category, input.ComicName), 0o755); err != nil {
-		a.setJob(id, func(job *Job) { job.Status, job.Error = "failed", err.Error(); job.FinishedAt = time.Now() })
-		return
+func newJob(id string, input downloadRequest) *Job {
+	job := &Job{
+		ID:        id,
+		Status:    "queued",
+		Comic:     safeName(input.ComicName),
+		Total:     len(input.Chapters),
+		StartedAt: time.Now(),
+		request:   input,
+		Chapters:  make([]JobChapter, len(input.Chapters)),
 	}
+	for index, chapter := range input.Chapters {
+		job.Chapters[index] = JobChapter{
+			ID:      strconv.Itoa(index),
+			Title:   chapter.Title,
+			Order:   chapter.Order,
+			Status:  "queued",
+			chapter: chapter,
+		}
+	}
+	return job
+}
 
-	workers := cfg.Workers
-	if workers > len(input.Chapters) {
-		workers = len(input.Chapters)
+func (a *App) jobSnapshot(id string) (Job, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	job := a.jobs[id]
+	if job == nil {
+		return Job{}, false
 	}
-	queue := make(chan Chapter)
-	var wg sync.WaitGroup
-	var progressMu sync.Mutex
-	progressByChapter := make(map[string]progressSnapshot)
-	progressStarted := time.Now()
-	updateProgress := func(key string, done, total int64) {
-		if total < 0 {
-			total = 0
-		}
-		progressMu.Lock()
-		progressByChapter[key] = progressSnapshot{Done: done, Total: total}
-		var bytesDone, bytesTotal int64
-		for _, progress := range progressByChapter {
-			bytesDone += progress.Done
-			bytesTotal += progress.Total
-		}
-		progressMu.Unlock()
-		elapsed := time.Since(progressStarted).Seconds()
-		var speed int64
-		if elapsed > 0 {
-			speed = int64(float64(bytesDone) / elapsed)
-		}
-		a.setJob(id, func(job *Job) {
-			job.BytesDone = bytesDone
-			job.BytesTotal = bytesTotal
-			job.SpeedBPS = speed
-		})
-	}
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for chapter := range queue {
-				progressKey := fmt.Sprintf("%d:%s", chapter.Order, chapter.URL)
-				a.fileSlots <- struct{}{}
-				filename, err := a.downloadChapter(context.Background(), cfg, input.ComicName, input.Category, input.ComicURL, chapter, func(done, total int64) {
-					updateProgress(progressKey, done, total)
-				})
-				<-a.fileSlots
-				a.setJob(id, func(job *Job) {
-					job.Done++
-					if err != nil {
-						job.Failures = append(job.Failures, chapter.Title+": "+err.Error())
-					} else {
-						job.Files = append(job.Files, filename)
-					}
-				})
+	copy := *job
+	copy.Files = append([]string(nil), job.Files...)
+	copy.Failures = append([]string(nil), job.Failures...)
+	copy.Chapters = append([]JobChapter(nil), job.Chapters...)
+	return copy, true
+}
+
+func summarizeJob(job *Job) {
+	job.Done = 0
+	job.BytesDone = 0
+	job.BytesTotal = 0
+	job.SpeedBPS = 0
+	job.Files = nil
+	job.Failures = nil
+	hasRunning := false
+	allDone := len(job.Chapters) > 0
+	for _, chapter := range job.Chapters {
+		job.BytesDone += chapter.Done
+		job.BytesTotal += chapter.Total
+		job.SpeedBPS += chapter.SpeedBPS
+		switch chapter.Status {
+		case "completed":
+			job.Done++
+			if chapter.File != "" {
+				job.Files = append(job.Files, chapter.File)
 			}
-		}()
+		case "failed":
+			job.Done++
+			job.Failures = append(job.Failures, chapter.Title+": "+chapter.Error)
+		case "running":
+			hasRunning = true
+			allDone = false
+		default:
+			allDone = false
+		}
 	}
-	for _, chapter := range input.Chapters {
-		queue <- chapter
-	}
-	close(queue)
-	wg.Wait()
-	a.setJob(id, func(job *Job) {
+	if allDone {
 		if len(job.Failures) > 0 {
 			job.Status = "completed_with_errors"
 		} else {
 			job.Status = "completed"
 		}
-		job.FinishedAt = time.Now()
-	})
+		if job.FinishedAt.IsZero() {
+			job.FinishedAt = time.Now()
+		}
+	} else if hasRunning {
+		job.Status = "running"
+		job.FinishedAt = time.Time{}
+	} else {
+		job.Status = "queued"
+		job.FinishedAt = time.Time{}
+	}
 }
 
-func (a *App) setJob(id string, update func(*Job)) {
+func (a *App) updateJobChapter(jobID, chapterID string, update func(*Job, *JobChapter)) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if job := a.jobs[id]; job != nil {
-		update(job)
+	job := a.jobs[jobID]
+	if job == nil {
+		return
+	}
+	for index := range job.Chapters {
+		chapter := &job.Chapters[index]
+		if chapter.ID != chapterID {
+			continue
+		}
+		update(job, chapter)
+		summarizeJob(job)
+		return
+	}
+}
+
+func (a *App) downloadWorker() {
+	for task := range a.downloadQueue {
+		a.updateJobChapter(task.JobID, task.ChapterID, func(job *Job, chapter *JobChapter) {
+			chapter.Status = "running"
+			chapter.StartedAt = time.Now()
+			job.Error = ""
+		})
+		cfg := a.config()
+		filename, err := a.downloadChapter(context.Background(), cfg, task.Request.ComicName, task.Request.Category, task.Request.ComicURL, task.Chapter, func(done, total int64) {
+			a.updateJobChapter(task.JobID, task.ChapterID, func(_ *Job, chapter *JobChapter) {
+				chapter.Done = done
+				chapter.Total = maxInt64(total, 0)
+				if !chapter.StartedAt.IsZero() {
+					elapsed := time.Since(chapter.StartedAt).Seconds()
+					if elapsed > 0 {
+						chapter.SpeedBPS = int64(float64(done) / elapsed)
+					}
+				}
+			})
+		})
+		a.updateJobChapter(task.JobID, task.ChapterID, func(_ *Job, chapter *JobChapter) {
+			chapter.FinishedAt = time.Now()
+			if err != nil {
+				chapter.Status = "failed"
+				chapter.Error = err.Error()
+				return
+			}
+			chapter.Status = "completed"
+			chapter.File = filename
+			if chapter.Total > 0 {
+				chapter.Done = chapter.Total
+			}
+		})
 	}
 }
 
@@ -1596,6 +1819,39 @@ func chapterOutput(cfg Config, category, comicName, chapterTitle string) (string
 	return downloadDir(cfg, category, comicName), fmt.Sprintf("[Kmoe][%s]%s.epub", safeName(comicName), safeName(title))
 }
 
+func downloadedFiles(cfg Config, category, comicName string) (map[string]bool, error) {
+	files := make(map[string]bool)
+	entries, err := os.ReadDir(downloadDir(cfg, category, comicName))
+	if errors.Is(err, os.ErrNotExist) {
+		return files, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".epub") {
+			continue
+		}
+		info, err := entry.Info()
+		if err == nil && info.Mode().IsRegular() {
+			files[entry.Name()] = true
+		}
+	}
+	return files, nil
+}
+
+func annotateDownloaded(cfg Config, category, comicName string, chapters []Chapter) ([]Chapter, error) {
+	files, err := downloadedFiles(cfg, category, comicName)
+	if err != nil {
+		return nil, err
+	}
+	for index := range chapters {
+		_, chapters[index].FileName = chapterOutput(cfg, category, comicName, chapters[index].Title)
+		chapters[index].Downloaded = files[chapters[index].FileName]
+	}
+	return chapters, nil
+}
+
 func (a *App) fetchKzoEPUB(ctx context.Context, downloadURL, baseURL string, progress progressFunc) ([]byte, error) {
 	data, _, err := a.fetchProgress(ctx, downloadURL, 2<<20, progress)
 	if err != nil {
@@ -1688,17 +1944,15 @@ func saveFile(dir, filename string, write func(*os.File) error) (string, error) 
 		return "", err
 	}
 	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
 	if err := write(tmp); err != nil {
 		tmp.Close()
-		os.Remove(tmpPath)
 		return "", err
 	}
 	if err := tmp.Close(); err != nil {
-		os.Remove(tmpPath)
 		return "", err
 	}
 	if err := os.Rename(tmpPath, path); err != nil {
-		os.Remove(tmpPath)
 		return "", err
 	}
 	return path, nil

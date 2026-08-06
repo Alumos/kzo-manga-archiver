@@ -1,4 +1,4 @@
-const state = { comics: [], categories: [], page: 1, totalPages: 1, total: 0, search: "", category: "", selectedComic: null, detail: null, chapters: [], selected: new Set(), auth: {}, jobs: [], view: "library", transition: 0 };
+const state = { comics: [], categories: [], page: 1, totalPages: 1, total: 0, search: "", category: "", selectedComic: null, detail: null, chapters: [], selected: new Set(), auth: {}, jobs: [], openJobs: new Set(), downloadedRefreshPending: false, view: "library", transition: 0 };
 
 const $ = (id) => document.getElementById(id);
 
@@ -231,8 +231,7 @@ function renderDetail() {
   $("detailDescription").textContent = detail.description || "暂无简介";
 }
 
-async function openDownloadView() {
-  switchView("download", "forward");
+async function loadChapters() {
   if (!state.selectedComic) {
     renderChapters();
     return;
@@ -241,9 +240,10 @@ async function openDownloadView() {
   $("chapters").className = "chapter-list empty-state";
   $("chapters").textContent = "加载章节中…";
   try {
-    const data = await api(`/api/chapters?url=${encodeURIComponent(state.selectedComic.url)}`);
+    const params = new URLSearchParams({ url: state.selectedComic.url, comicName: state.selectedComic.title, category: state.detail?.tags?.[0] || "" });
+    const data = await api("/api/chapters?" + params);
     state.chapters = data.chapters || [];
-    state.selected = new Set(state.chapters.map((chapter) => chapter.url));
+    state.selected = new Set(state.chapters.filter((chapter) => !chapter.downloaded).map((chapter) => chapter.url));
     renderChapters();
   } catch (error) {
     state.chapters = [];
@@ -254,13 +254,44 @@ async function openDownloadView() {
   }
 }
 
+async function refreshDownloaded() {
+  if (state.downloadedRefreshPending || state.view !== "download" || !state.selectedComic || !state.chapters.length) return;
+  state.downloadedRefreshPending = true;
+  try {
+    const params = new URLSearchParams({ url: state.selectedComic.url, comicName: state.selectedComic.title, category: state.detail?.tags?.[0] || "" });
+    const data = await api("/api/downloaded?" + params);
+    const files = new Set(data.files || []);
+    let changed = false;
+    state.chapters.forEach((chapter) => {
+      const downloaded = Boolean(chapter.fileName && files.has(chapter.fileName));
+      if (downloaded !== Boolean(chapter.downloaded)) changed = true;
+      chapter.downloaded = downloaded;
+    });
+    const nextSelected = new Set([...state.selected].filter((url) => !state.chapters.find((chapter) => chapter.url === url && chapter.downloaded)));
+    if (nextSelected.size !== state.selected.size) changed = true;
+    state.selected = nextSelected;
+    if (changed) renderChapters();
+  } catch (_) {
+    // Keep the jobs page usable if the NAS directory is temporarily unavailable.
+  } finally {
+    state.downloadedRefreshPending = false;
+  }
+}
+
+async function openDownloadView() {
+  switchView("download", "forward");
+  await loadChapters();
+}
+
 function renderChapters() {
   const root = $("chapters");
   root.replaceChildren();
   $("downloadHeading").textContent = state.selectedComic?.title || "选择漫画";
-  $("chapterCount").textContent = `${state.chapters.length} 章`;
+  const downloadedCount = state.chapters.filter((chapter) => chapter.downloaded).length;
+  const downloadable = state.chapters.filter((chapter) => !chapter.downloaded);
+  $("chapterCount").textContent = `${state.chapters.length} 章 · ${downloadedCount} 已下载`;
   $("selectedCount").textContent = `已选 ${state.selected.size} 章`;
-  $("selectAll").checked = state.chapters.length > 0 && state.selected.size === state.chapters.length;
+  $("selectAll").checked = downloadable.length > 0 && state.selected.size === downloadable.length;
   $("downloadButton").disabled = !state.selectedComic || state.selected.size === 0;
   $("downloadTarget").textContent = `下载目录 / ${state.detail?.tags?.[0] || "未分类"} / ${state.selectedComic?.title || "—"}`;
   if (!state.chapters.length) {
@@ -271,9 +302,10 @@ function renderChapters() {
   root.className = "chapter-list";
   state.chapters.forEach((chapter) => {
     const label = document.createElement("label");
-    label.className = "chapter-row";
+    label.className = `chapter-row ${chapter.downloaded ? "downloaded" : ""}`;
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
+    checkbox.disabled = Boolean(chapter.downloaded);
     checkbox.checked = state.selected.has(chapter.url);
     checkbox.onchange = () => {
       if (checkbox.checked) state.selected.add(chapter.url);
@@ -285,7 +317,10 @@ function renderChapters() {
     order.textContent = `序号 ${String(chapter.order).padStart(2, "0")}`;
     const title = document.createElement("span");
     title.textContent = chapter.title;
-    label.append(checkbox, order, title);
+    const status = document.createElement("small");
+    status.className = `chapter-status ${chapter.downloaded ? "downloaded" : "pending"}`;
+    status.textContent = chapter.downloaded ? "已下载" : "待下载";
+    label.append(checkbox, order, title, status);
     root.append(label);
   });
 }
@@ -295,7 +330,8 @@ async function startDownload() {
   const button = $("downloadButton");
   setLoading(button, true, "已加入任务…");
   try {
-    await api("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ comicName: state.selectedComic.title, comicUrl: state.selectedComic.url, category: state.detail?.tags?.[0] || "", chapters: state.chapters.filter((chapter) => state.selected.has(chapter.url)) }) });
+    const result = await api("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ comicName: state.selectedComic.title, comicUrl: state.selectedComic.url, category: state.detail?.tags?.[0] || "", chapters: state.chapters.filter((chapter) => state.selected.has(chapter.url) && !chapter.downloaded) }) });
+    if (result.status === "skipped") showNotice(result.message || "所选章节都已下载");
     await loadJobs();
   } catch (error) {
     showNotice(error.message);
@@ -352,6 +388,7 @@ async function loadJobs() {
     $("jobCount").textContent = active;
     $("heroJobCount").textContent = active;
     renderJobs();
+    refreshDownloaded();
   } catch (_) {}
 }
 
@@ -366,8 +403,21 @@ function formatBytes(bytes) {
 
 function formatSpeed(bytes) { return bytes ? `${formatBytes(bytes)}/s` : "等待数据…"; }
 
+async function retryChapter(jobID, chapterID, button) {
+  setLoading(button, true, "排队中…");
+  try {
+    await api("/api/jobs/retry", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jobId: jobID, chapterId: chapterID }) });
+    showNotice("已加入队列，重试不会插队");
+    await loadJobs();
+  } catch (error) {
+    showNotice(error.message);
+    setLoading(button, false);
+  }
+}
+
 function renderJobs() {
   const root = $("jobs");
+  const openJobs = new Set([...root.querySelectorAll("details[data-job-id][open]")].map((item) => item.dataset.jobId));
   root.replaceChildren();
   if (!state.jobs.length) {
     root.className = "jobs-list empty-state";
@@ -376,8 +426,14 @@ function renderJobs() {
   }
   root.className = "jobs-list";
   state.jobs.forEach((job) => {
-    const item = document.createElement("div");
-    item.className = "job";
+    const item = document.createElement("details");
+    item.className = "job-group";
+    item.dataset.jobId = job.id;
+    const active = job.status === "running" || job.status === "queued";
+    item.open = state.openJobs.has(job.id) || openJobs.has(job.id) || active;
+    item.ontoggle = () => item.open ? state.openJobs.add(job.id) : state.openJobs.delete(job.id);
+    const summary = document.createElement("summary");
+    summary.className = "job-summary";
     const top = document.createElement("div");
     top.className = "job-top";
     const name = document.createElement("span");
@@ -386,6 +442,10 @@ function renderJobs() {
     status.className = "muted-text";
     status.textContent = jobStatus(job);
     top.append(name, status);
+    summary.append(top);
+    item.append(summary);
+    const body = document.createElement("div");
+    body.className = "job-body";
     const progress = document.createElement("div");
     progress.className = "progress";
     const fill = document.createElement("i");
@@ -399,25 +459,59 @@ function renderJobs() {
     const byteMeta = document.createElement("span");
     byteMeta.textContent = job.bytesTotal > 0 ? `${formatBytes(job.bytesDone)} / ${formatBytes(job.bytesTotal)} · ${formatSpeed(job.speedBps)}` : formatSpeed(job.speedBps);
     meta.append(chapterMeta, byteMeta);
-    item.append(top, progress, meta);
-    if (job.failures?.length) {
-      const failure = document.createElement("div");
-      failure.className = "failure";
-      failure.textContent = `${job.failures.length} 章失败：${job.failures[0]}`;
-      item.append(failure);
-    }
+    body.append(progress, meta);
+    const chapters = document.createElement("div");
+    chapters.className = "job-chapters";
+    (job.chapters || []).forEach((chapter) => {
+      const row = document.createElement("div");
+      row.className = "job-chapter";
+      const info = document.createElement("div");
+      info.className = "job-chapter-info";
+      const title = document.createElement("strong");
+      title.textContent = chapter.title;
+      const chapterStatus = document.createElement("span");
+      chapterStatus.className = `chapter-job-status ${chapter.status}`;
+      chapterStatus.textContent = jobChapterStatus(chapter);
+      info.append(title, chapterStatus);
+      const chapterProgress = document.createElement("div");
+      chapterProgress.className = "progress chapter-progress";
+      const chapterFill = document.createElement("i");
+      const chapterFraction = chapter.total > 0 ? chapter.done / chapter.total : (chapter.status === "completed" ? 1 : 0);
+      chapterFill.style.width = `${Math.min(100, Math.round(chapterFraction * 100))}%`;
+      chapterProgress.append(chapterFill);
+      const chapterMeta = document.createElement("div");
+      chapterMeta.className = "job-chapter-meta";
+      chapterMeta.textContent = chapter.total > 0 ? `${formatBytes(chapter.done)} / ${formatBytes(chapter.total)} · ${formatSpeed(chapter.speedBps)}` : formatSpeed(chapter.speedBps);
+      row.append(info, chapterProgress, chapterMeta);
+      if (chapter.status === "failed") {
+        const failure = document.createElement("div");
+        failure.className = "failure";
+        failure.textContent = chapter.error || "下载失败";
+        row.append(failure);
+        const retry = document.createElement("button");
+        retry.className = "button retry-button";
+        retry.type = "button";
+        retry.textContent = "重试";
+        retry.onclick = (event) => { event.preventDefault(); event.stopPropagation(); retryChapter(job.id, chapter.id, retry); };
+        row.append(retry);
+      }
+      chapters.append(row);
+    });
+    body.append(chapters);
+    item.append(body);
     root.append(item);
   });
 }
 
 function jobStatus(job) { return { queued: "排队中", running: "下载中", completed: "已完成", completed_with_errors: "部分失败", failed: "失败" }[job.status] || job.status; }
+function jobChapterStatus(chapter) { return { queued: "排队中", running: "下载中", completed: "已完成", failed: "失败" }[chapter.status] || chapter.status; }
 
 $("syncButton").onclick = () => syncLibrary();
 $("jobNavButton").onclick = openDownloadView;
 $("searchButton").onclick = () => { state.search = $("searchInput").value.trim(); syncLibrary(true); };
 $("searchInput").onkeydown = (event) => { if (event.key === "Enter") { event.preventDefault(); $("searchButton").click(); } };
 $("categorySelect").onchange = () => { state.category = $("categorySelect").value; syncLibrary(true); };
-$("selectAll").onchange = () => { state.selected = new Set($("selectAll").checked ? state.chapters.map((chapter) => chapter.url) : []); renderChapters(); };
+$("selectAll").onchange = () => { state.selected = new Set($("selectAll").checked ? state.chapters.filter((chapter) => !chapter.downloaded).map((chapter) => chapter.url) : []); renderChapters(); };
 $("downloadButton").onclick = startDownload;
 $("chaptersButton").onclick = openDownloadView;
 $("backLibraryButton").onclick = () => switchView("library", "back");
